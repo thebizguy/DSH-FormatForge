@@ -133,9 +133,7 @@ class PDFParser(BaseParser):
                 # H16/audit: 选择必须先对照真实页数校验——--pages 9999 之前是 0 页
                 # 空文档 + ok:true 假成功
                 if selected and max(selected) > total_pages:
-                    raise ValueError(
-                        f"pages 参数格式错误: 请求页 {max(selected)} 超出范围（PDF 共 {total_pages} 页）"
-                    )
+                    raise ValueError(f"pages 参数格式错误: 请求页 {max(selected)} 超出范围（PDF 共 {total_pages} 页）")
 
                 # E2-2: 先扫全书的页首/尾候选行（跨页重复 ≥60% 才判为 furniture）
                 furniture = self._detect_furniture(pdf) if drop_furniture else set()

@@ -289,7 +289,6 @@ def cmd_batch(args: argparse.Namespace) -> int:
         }
         # H4/audit: as_completed 带相对超时——一个 hung 文件不能把整批 wedged 到天荒地老
         total_budget = per_file_timeout * max(1, len(futures))
-        timed_out = False
         try:
             for fut in as_completed(futures, timeout=total_budget):
                 try:
@@ -305,7 +304,6 @@ def cmd_batch(args: argparse.Namespace) -> int:
                         }
                     )
         except concurrent.futures.TimeoutError:
-            timed_out = True
             for fut, target in futures.items():
                 if not fut.done():
                     fut.cancel()
