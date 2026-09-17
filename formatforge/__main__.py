@@ -118,12 +118,14 @@ def translate_file_data(
         if "pages 参数格式错误" in str(err):
             return {"kind": "bad_request", "message": str(err)}, 7
         return {"kind": "parse_failed", "message": str(err)}, 4
-    if (
-        result.structuredData
-        and result.structuredData.get("error")
-        and "pages 参数格式错误" in str(result.convertedContent)
-    ):
-        return {"kind": "bad_request", "message": result.convertedContent}, 7
+    sd = getattr(result, "structuredData", None)
+    # H1: pipeline 失败也会返回真实 ConvertResultData（_build_error_response 把错误文本
+    # 放进 convertedContent、structuredData={"error": True}）——入口必须显式识别，
+    # 不能把错误文本当转换产物返回 ok:true。
+    if isinstance(sd, dict) and sd.get("error"):
+        if "pages 参数格式错误" in str(result.convertedContent):
+            return {"kind": "bad_request", "message": result.convertedContent}, 7
+        return {"kind": "parse_failed", "message": result.convertedContent}, 4
 
     data: dict[str, Any] = {
         "content": result.convertedContent,
@@ -394,6 +396,10 @@ def cmd_translate_main(
     result = response.get("result")
     if result is None:
         raise ValueError(str(ctx.error or "未知错误"))
+    # H1: 同 translate_file_data —— structuredData.error=True 说明这是错误响应页，不是转换产物
+    result_sd = getattr(result, "structuredData", None)
+    if isinstance(result_sd, dict) and result_sd.get("error"):
+        raise ValueError(str(result.convertedContent))
     meta = {
         "parser": result.fileInfo.fileType.value if result.fileInfo else "unknown",
         "file_size": result.fileInfo.fileSize if result.fileInfo else 0,
