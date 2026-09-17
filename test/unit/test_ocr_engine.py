@@ -287,3 +287,18 @@ class TestH17AvailabilityHonesty:
         backend = ocr.TesseractBackend()
         text, conf = backend.recognize(tmp_path / "whatever.png")
         assert text == "" and conf == 0.0
+
+    def test_fallback_locates_binary_in_standard_location(self, tmp_path, monkeypatch):
+        """H17 跟进：PATH 没有 tesseract 时，标准安装位置探测应找到二进制并启用。"""
+        import core.ocr_engine as ocr
+
+        fake_exe = tmp_path / "tesseract.exe"
+        fake_exe.write_bytes(b"")  # 只验证「文件存在即命中探测」，版本由 mock 验证
+        monkeypatch.setattr(ocr, "_TESSERACT_FALLBACK_PATHS", (str(fake_exe),))
+        assert ocr._locate_standard_tesseract_binary() == str(fake_exe)
+
+    def test_fallback_returns_none_when_no_standard_location(self, tmp_path, monkeypatch):
+        import core.ocr_engine as ocr
+
+        monkeypatch.setattr(ocr, "_TESSERACT_FALLBACK_PATHS", (str(tmp_path / "missing.exe"),))
+        assert ocr._locate_standard_tesseract_binary() is None
