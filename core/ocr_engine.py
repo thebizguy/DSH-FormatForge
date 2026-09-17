@@ -45,6 +45,15 @@ except ImportError:
     pytesseract = None
     TESSERACT_AVAILABLE = False
 
+if TESSERACT_AVAILABLE:
+    # H17/audit: 只凭 pytesseract *可导入* 就声明可用，会在没有 tesseract 二进制的
+    # 环境里静默返回空文本（confidence 0.0）却声称可用——这里必须再验证二进制本体。
+    try:
+        pytesseract.get_tesseract_version()
+    except Exception:
+        logger.warning("pytesseract 可导入但 tesseract 二进制不可用，OCR 后端标记为不可用")
+        TESSERACT_AVAILABLE = False
+
 try:
     from paddleocr import PaddleOCR
 
