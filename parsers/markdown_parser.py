@@ -405,6 +405,24 @@ class MarkdownParser(BaseParser):
                 )
                 raw_lines.append(clean_text)
                 elem_idx += 1
+            else:
+                # H10/audit: 防死循环兜底——当前行匹配 _is_block_element 模式却没有任何
+                # 分支消费它（如 [ref]: http://x (Title)）时，此前 i 永不前进 → 永久
+                # wedge（batch 里不等价于 hang，是 100% 复现的卡死）。按普通段落消费前行。
+                if i < len(lines):
+                    para_lines.append(lines[i].rstrip())
+                    i += 1
+                    text = lines[i - 1].strip()
+                    elements.append(
+                        ExtractedElement(
+                            elementId=f"elem_1_{elem_idx}",
+                            elementType="text",
+                            content=text,
+                            metadata={"line_start": current_line},
+                        )
+                    )
+                    raw_lines.append(text)
+                    elem_idx += 1
 
         logger.info("Markdown 解析完成: %d 个元素", len(elements))
 
