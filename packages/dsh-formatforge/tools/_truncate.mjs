@@ -66,6 +66,9 @@ export function smartTruncate(text, maxChars, start = 0) {
   }
   let chunk, next
   if (cut <= 0) {
+    // H2/audit 镜像注释（与 core/utils.py::smart_truncate 同步修复）：
+    // windowEnd 本身就是绝对偏移，硬切分支直接用其作为 next——这里 JS 侧原本就正确，
+    // Python 侧曾写成 start + window_end（double-count start）导致丢内容与假 EOF。
     chunk = window
     next = windowEnd
   } else {

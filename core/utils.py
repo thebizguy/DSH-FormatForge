@@ -120,8 +120,11 @@ def smart_truncate(text: str, max_chars: int, start: int = 0) -> tuple[str, int 
             cut = window.rfind("\n")
             sep_len = 1  # "\n"
     if cut <= 0:
+        # H2/audit 修复：硬切分支不再 double-count start——window_end 是绝对偏移，
+        # 直接作为下一页起点（此前 start + window_end 会跳过 ~60% 内容并提前报 EOF，
+        # 也破坏 JS 侧 smartTruncate 的分页契约，两侧已同步修复）。
         chunk = window
-        nxt = start + window_end
+        nxt = window_end
     else:
         chunk = window[:cut]
         nxt = start + cut + sep_len
