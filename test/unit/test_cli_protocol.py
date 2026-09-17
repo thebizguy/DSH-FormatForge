@@ -894,3 +894,40 @@ class TestR14DiffIncremental:
         assert payload["data"].get("skipped") is not True
         assert payload["data"]["additions"] == 1
         assert code == 0
+
+
+class TestH12DiffDirection:
+    """H12/audit: 双文件调用按文档顺序 `diff <path_a> <path_b>` 解析——additions/deletions 不再 report 反。"""
+
+    def test_two_file_diff_direction(self, tmp_path, capsys):
+        from formatforge.__main__ import main
+
+        old = tmp_path / "v1.txt"
+        new = tmp_path / "v2.txt"
+        old.write_text("a\nb\nc\n", encoding="utf-8")
+        new.write_text("a\nx\nc\n", encoding="utf-8")
+
+        rc = main(["diff", str(old), str(new)])
+        out = capsys.readouterr().out
+        payload = json.loads(out.splitlines()[0])
+        assert payload["ok"] is True
+        data = payload["data"]
+        assert data["path_a"].endswith("v1.txt")  # 文档顺序：第一个实参 = path_a
+        assert data["path_b"].endswith("v2.txt")
+        assert data["additions"] == 1  # x 是新加的
+        assert data["deletions"] == 1  # b 被替换
+        assert rc == 0
+
+    def test_deletion_of_lines_counts_as_deletions(self, tmp_path, capsys):
+        from formatforge.__main__ import main
+
+        old = tmp_path / "del1.txt"
+        new = tmp_path / "del2.txt"
+        old.write_text("p\nq\nr\ns\n", encoding="utf-8")
+        new.write_text("p\nq\n", encoding="utf-8")
+
+        main(["diff", str(old), str(new)])
+        payload = json.loads(capsys.readouterr().out.splitlines()[0])
+        data = payload["data"]
+        assert data["additions"] == 0
+        assert data["deletions"] == 2  # r/s 被删（此前会 report 成 additions=2）

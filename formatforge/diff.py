@@ -53,19 +53,20 @@ def _read_text_lines(path: Path, fmt: str) -> list[str]:
 
 
 def _resolve_paths(args: argparse.Namespace) -> tuple[str | None, str | None]:
-    """v0.14.0: 容错 path_a/path_b 顺序。
+    """H12/audit: 双文件情形显式按文档顺序解析。
 
-    CLI 顺序约定 path_b 在前 path_a 在后（argparse 限制）。
-    但 JS/测试可能仍传 path_a path_b 旧顺序——若 path_a 是文件 path_b 不是，互换。
-    增量模式下 path_a 可缺；不参与互换。
+    用法文档约定 `diff <path_a> <path_b>`（path_a=旧版本在前）。argparse 因
+    option-in-positional 限制把两个 positional 都注册为 optional，但注册顺序
+    是 path_b 在前——这意味着双文件调用时 CLI 第一个实参落在 path_b 变量上、
+    第二个落在 path_a 变量上，additions/deletions 从此 report 反了。
+    两个都给了 → 按「位置语义」恢复文档顺序（第一个 = path_a，第二个 = path_b）；
+    单文件（增量模式 path_a 缺省）不交换。
     """
     pa = args.path_a
     pb = args.path_b
     if pa and pb:
-        pa_p = Path(pa)
-        pb_p = Path(pb)
-        if pa_p.is_file() and not pb_p.is_file():
-            return pb, pa  # 互换
+        # 双文件：CLI 实参顺序是 文档 path_a, path_b；当前变量是互换存着的 → 换回
+        return pb, pa
     return pa, pb
 
 
@@ -373,7 +374,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     # v0.14.0: path_a/path_b 都变 optional（增量模式只需 path_b），
     # argparse 限制：当 positional 是 [optional, required] 时中间夹 --option value 会解析失败，
     # 所以两个都 optional + 内部互斥检查。
-    # 顺序：CLI 调用必须 path_b 在前，path_a 在后——cmd_diff 内部通过 _resolve_paths 处理。
+    # 注册顺序仍是 path_b 在前；H12 修复后双文件调用在 _resolve_paths 里按
+    # 位置语义恢复文档顺序（首个实参 = path_a 旧版）。
     p_d.add_argument("path_b", nargs="?", help="文件 B 路径（新版本）；增量模式必填")
     p_d.add_argument("path_a", nargs="?", help="文件 A 路径（旧版本；增量模式下可选）")
     p_d.add_argument("--format", default="text", choices=["json", "markdown", "html", "text"])
