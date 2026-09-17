@@ -152,7 +152,11 @@ def format_output(content: str, output_format: Any, structured_data: dict | None
             return f"# 转换结果\n\n{content}"
         return content
     elif output_format == OutputFormat.HTML:
-        html = content.replace("\n\n", "</p><p>").replace("\n", "<br>")
+        # H3/audit: 先整体 html.escape 再包 <div>——html_parser 的 unescape 与 markdown
+        # 的 raw-HTML 直通会把活体标签送进这条分支，不转义就是可执行的存储型 XSS 产物。
+        import html as _html
+
+        html = _html.escape(content).replace("\n\n", "</p><p>").replace("\n", "<br>")
         return f"<div class='converted-content'><p>{html}</p></div>"
     else:
         return content
