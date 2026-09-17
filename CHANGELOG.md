@@ -7,6 +7,44 @@
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
+
+> 一个 commit 对应一项修复（commit 备注 `fix(H<id>)`）；协议 todo：stdout 仍是唯一的 JSON 出口。
+
+### 修复（高危，audit「Worth fixing now」全 12 项）
+
+1. **H1 失败可检测**：`translate_file_data` / `cmd_translate_main` 显式识别
+   `structuredData={"error": True}` 错误响应页（此前 `result is None` 是死代码），
+   分别路由 parse_failed / bad_request；batch 不再把错误文本当产物写入产物文件并虚报 `ok_count`。
+   解析失败被吞掉后的 raw 字节透传 confidence 1.0 → 0.3（`raw_passthrough` 标记）。
+2. **H7 缓存反序列化（安全）**：`content_cache.py` 的两条 pickle 读取路径（含 import 时全局扫描）
+   删除；JSON-only + v2 版本门控（未知格式忽略/失效并删除，绝不反序列化）；默认目录跟进
+   `settings.CACHE_PERSIST_PATH`（不再 CWD 相对 `./cache`）。
+3. **H2 smart_truncate 硬切分支**：`nxt = window_end`（不再 double-count start）——分页长文
+   1000→400 字符丢内容 + 假 EOF 已修；JS `_truncate.mjs` 加镜像注释（JS 侧本就正确）。
+4. **H4/H5 batch 健壮性**：conv_type 逐文件解析；产物 `write_text` 移入 per-file try（OSError → `write_failed` 行，
+   不再因为产物写不进去；`FF_MAX_BYTES` batch 路径补齐校验；`as_completed(timeout=)` 超时记录行不再永久 wedged；
+   递归批处理产物镜像子目录，避免 stem 冲突。
+5. **H3 HTML 产物转义**：`format_output` HTML 分支先 `html.escape` 再包 `<div>`（存储型 XSS 产物路径合上；unEscaper/markdown 直通的活体标签不再落盘可执行）。
+6. **H12 diff 顺序**：双文件按文档顺序 `diff <path_a> <path_b>` 解析；additions/deletions 不再 report 反；ff_diff 工具按文档顺序传参。
+7. **H13/H16 页选择统一**：pdf_parser 并入 `parse_pages_spec`（同规则 + 同 `"pages 参数格式错误"` marker，ParseStep 卡死分类一致上抛）；拒绝 0/递减范围；按真实页数校验；保留请求顺序。
+8. **H6 EPUB 路径**：opf_dir + href 无条件 normpath join（标准 OEBPS/content.opf + Text/ch*.xhtml 布局此前整本书空白）；NCX 同修；`<script>/<style>` skip 只被配对结束标签解除。
+9. **H9/H8 音频**：`_parse_wav` seek(0)+逐 chunk 读取（此前 fmt/data 永远找不到，所有 WAV 元数据错）；M4A moov 读取 CAPPED 8MB（16 字节 M4A 声称 0xFFFFFF00 不再 ~4GiB 分配）；损坏 FLAC/微型 MP3 边界。
+10. **H10 markdown 防死循环**：无分支消费的块级 pattern 行（如 `[ref]: http://x (Title)`）按普通段落消费，i 前进（此前永久 wedge）。
+11. **H15 ODF 整数炸弹**：`text:c` / `number-columns-repeated` / `outline-level` 钳制 + 非数字容错；
+    per-element try/except（单畸形 attribute 不再中止整份文档）。
+12. **H17 OCR 可用性诚实**：is_available 校验 tesseract 二进制本体（pytesseract 导入成功不足以声称可用；
+    静默空文本@0.0 现象消除）。
+
+### 测试
+
+- 全部 12 项修复各带针对性回归测试（同 commit）；全套 pytest 589+ 用例与新基线对齐（pre-existing 25 个 subconsole 环境用例不变）。
+
+### 不在本轮范围（仍 open）
+
+H18（.doc/.xlsb/.xls/.ppt/MSG 广告支持）是产品决策（装库 vs 收缩宣称），见 summary 提案；Secondary/medium findings
+（resume mtime 信任、--output-file 无沙箱、加密 PDF、temp PNG 泄漏、kind remapping、--help 协议、H21 cache-key 不对称等）仍 open。
+
 ## [1.0.1] - 2026-08-31 — Hotfix（description + argparse JSON 化）
 
 > 基线：v1.0.0（567 测试）→ v1.0.1（569 测试，+2）
