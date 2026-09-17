@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import json
+import logging
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -21,6 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from core.errors import ErrorCode, exit_code_of
+
+logger = logging.getLogger("formatforge.batch")
 
 #: 支持的输入扩展名（与 inbox watcher 白名单保持一致；v0.13.0/B2: 移除 .doc）
 KNOWN_EXT = {
@@ -93,6 +97,23 @@ def _collect_targets(source: Path, recursive: bool) -> list[Path]:
     return [p for p in candidates if p.is_file() and p.suffix.lower() in KNOWN_EXT]
 
 
+def _out_path_for(target: Path, source_dir: Path | None, out_dir: Path, out_ext: str, recursive: bool) -> Path:
+    """计算单文件产物路径。
+
+    H4/audit: 递归批处理的 stem-only 输出键会在子目录间碰撞（两个 sub/a.txt 和
+    sub2/a.txt 都写 out/a.md）——目录源 + recursive 时按相对路径镜像子目录；
+    其余情况保持 flat <stem><ext> 命名。
+    """
+    if recursive and source_dir is not None and source_dir.is_dir():
+        try:
+            rel = target.relative_to(source_dir)
+        except ValueError:
+            rel = None
+        if rel is not None:
+            return out_dir / rel.with_suffix(out_ext)
+    return out_dir / f"{target.stem}{out_ext}"
+
+
 def _translate_one(
     path: Path,
     out_dir: Path,
@@ -103,14 +124,34 @@ def _translate_one(
     quality: bool = False,
     encoding: str | None = None,
     language: str | None = None,
+    out_path: Path | None = None,
 ) -> dict[str, Any]:
-    """转换单个文件，返回结果行。v0.13.0/A3: 透传 quality/encoding/language。"""
+    """转换单个文件，返回结果行。v0.13.0/A3: 透传 quality/encoding/language。
+
+    H4/audit: conv_type 按文件逐个推断（auto 时按扩展名），不再取自 targets[0]。
+    """
+    from core.config import settings
     from formatforge.__main__ import cmd_translate_main
 
     started = time.time()
+
+    # H4/audit: batch 路径此前完全没做 FF_MAX_BYTES 校验（只有 translate CLI 入口有）
+    size = path.stat().st_size
+    if size > settings.FF_MAX_BYTES:
+        return {
+            "file": str(path),
+            "ok": False,
+            "kind": "too_large",
+            "message": f"文件 {size} 字节超过上限 {settings.FF_MAX_BYTES}",
+            "elapsed_ms": 0,
+        }
+
+    # conv_type 逐文件解析（--type auto 时按扩展名提示）
+    effective_conv_type = _EXT_FORMAT_HINT.get(path.suffix.lower(), "auto") if conv_type == "auto" else conv_type
+
     try:
         content, meta, enhance = cmd_translate_main(
-            path, to_format, conv_type, timeout_s, pages, quality, encoding, language
+            path, to_format, effective_conv_type, timeout_s, pages, quality, encoding, language
         )
     except Exception as e:  # 单文件失败不拖垮整批
         return {
@@ -126,8 +167,8 @@ def _translate_one(
     ext_map = {"markdown": ".md", "html": ".html", "json": ".json", "text": ".txt"}
     out_ext = ext_map.get(to_format, f".{to_format}")
     stem = path.stem if path.suffix.lower() == out_ext else path.stem
-    out_path = out_dir / f"{stem}{out_ext}"
-    out_path.write_text(content, encoding="utf-8")
+    if out_path is None:
+        out_path = out_dir / f"{stem}{out_ext}"
     row: dict[str, Any] = {
         "file": str(path),
         "ok": True,
@@ -137,6 +178,18 @@ def _translate_one(
         "chars": len(content),
         "elapsed_ms": elapsed,
     }
+    # H5/audit: 产物写入必须在 try 内——一次 OSError 不能让 fut.result() 抛出而拖垮整批
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(content, encoding="utf-8")
+    except Exception as e:
+        return {
+            "file": str(path),
+            "ok": False,
+            "kind": "write_failed",
+            "message": f"产物写入失败: {out_path.name}: {e}",
+            "elapsed_ms": elapsed,
+        }
     # A3: 把 enhance 透传到结果行（让 batch 报告/产物消费者能感知增强提示）
     if enhance:
         row["enhance"] = enhance
@@ -190,46 +243,84 @@ def cmd_batch(args: argparse.Namespace) -> int:
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     workers = max(1, min(args.workers, 8))
-    conv_type = _EXT_FORMAT_HINT.get(targets[0].suffix.lower(), args.type) if args.type == "auto" else args.type
 
     # 续跑：产物比源新 → 跳过（--force 强制重转）
     ext_map = {"markdown": ".md", "html": ".html", "json": ".json", "text": ".txt"}
     out_ext = ext_map.get(args.format, f".{args.format}")
-    pending: list[Path] = []
+    pending: list[tuple[Path, Path]] = []
     skipped = 0
     for t in targets:
+        # H4/audit: 产物路径在 cmd_batch 统一计算（递归时镜像子目录，避免 stem 碰撞）
+        out_path = _out_path_for(t, source if source.is_dir() else None, out_dir, out_ext, args.recursive)
         if args.force:
-            pending.append(t)
+            pending.append((t, out_path))
             continue
-        existing = out_dir / f"{t.stem}{out_ext}"
+        existing = out_path
         if existing.exists() and existing.stat().st_mtime >= t.stat().st_mtime:
             skipped += 1
         else:
-            pending.append(t)
+            pending.append((t, out_path))
 
     results: list[dict[str, Any]] = []
     # v0.13.0/A3: 透传 quality/encoding/language 给每个文件
     batch_quality = bool(getattr(args, "quality", False))
     batch_encoding = getattr(args, "encoding", None)
     batch_language = getattr(args, "language", None)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
+    per_file_timeout = max(1, int(settings.FF_TIMEOUT_S))
+    # H4/audit: conv_type 不再取自 targets[0]——把 --type 原值传下去，由 _translate_one
+    # 按每个文件的扩展名逐个解析（mixed-extension 目录才能拿到各自正确的输出）
+    pool = ThreadPoolExecutor(max_workers=workers)
+    try:
         futures = {
             pool.submit(
                 _translate_one,
                 t,
                 out_dir,
                 args.format,
-                conv_type,
+                args.type,
                 settings.FF_TIMEOUT_S,
                 args.pages,
                 batch_quality,
                 batch_encoding,
                 batch_language,
+                out_path,
             ): t
-            for t in pending
+            for t, out_path in pending
         }
-        for fut in as_completed(futures):
-            results.append(fut.result())
+        # H4/audit: as_completed 带相对超时——一个 hung 文件不能把整批 wedged 到天荒地老
+        total_budget = per_file_timeout * max(1, len(futures))
+        timed_out = False
+        try:
+            for fut in as_completed(futures, timeout=total_budget):
+                try:
+                    results.append(fut.result())
+                except Exception as e:  # noqa: BLE001  单行异常不拖垮整批
+                    results.append(
+                        {
+                            "file": str(futures[fut]),
+                            "ok": False,
+                            "kind": "parse_failed",
+                            "message": str(e),
+                            "elapsed_ms": 0,
+                        }
+                    )
+        except concurrent.futures.TimeoutError:
+            timed_out = True
+            for fut, target in futures.items():
+                if not fut.done():
+                    fut.cancel()
+                    results.append(
+                        {
+                            "file": str(target),
+                            "ok": False,
+                            "kind": "timeout",
+                            "message": f"单文件转换超时（>{per_file_timeout}s），未被整批拖垮",
+                            "elapsed_ms": 0,
+                        }
+                    )
+            logger.warning("batch 部分文件超时——注意：worker 线程仍可能在后台运行")
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
 
     ok_rows = [r for r in results if r["ok"]]
     fail_rows = [r for r in results if not r["ok"]]
