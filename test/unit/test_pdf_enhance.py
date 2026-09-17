@@ -19,8 +19,17 @@ class TestParsePagesSpec:
     def test_ranges_and_singles(self):
         assert parse_pages_spec("1-3,7") == {1, 2, 3, 7}
 
-    def test_reversed_range(self):
-        assert parse_pages_spec("5-3") == {3, 4, 5}
+    def test_reversed_range_rejected(self):
+        """H13: 递减范围是用户输入错误，统一以 "pages 参数格式错误" 拒绝（不再静默互换）。"""
+        with pytest.raises(ValueError, match="pages 参数"):
+            parse_pages_spec("5-3")
+
+    def test_zero_and_nonpositive_rejected(self):
+        """H13: 页号从 1 开始——拒绝 0。"""
+        with pytest.raises(ValueError, match="pages 参数"):
+            parse_pages_spec("0")
+        with pytest.raises(ValueError, match="pages 参数"):
+            parse_pages_spec("1-0")
 
     def test_invalid_raises(self):
         with pytest.raises(ValueError, match="pages 参数"):

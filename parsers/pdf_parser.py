@@ -111,6 +111,11 @@ class PDFParser(BaseParser):
             PageContent: 每一页的内容
         """
         selected = self._parse_page_selection(pages)
+        selection_order = None
+        if selected:
+            from core.pdf_enhance import parse_pages_spec_ordered
+
+            selection_order = parse_pages_spec_ordered(pages)
         logger.info(
             "开始流式解析 PDF: %s (OCR=%s, backend=%s, pages=%s, furniture=%s)",
             file_path,
@@ -125,18 +130,29 @@ class PDFParser(BaseParser):
                 total_pages = len(pdf.pages)
                 logger.info("PDF 共 %d 页", total_pages)
 
+                # H16/audit: 选择必须先对照真实页数校验——--pages 9999 之前是 0 页
+                # 空文档 + ok:true 假成功
+                if selected and max(selected) > total_pages:
+                    raise ValueError(
+                        f"pages 参数格式错误: 请求页 {max(selected)} 超出范围（PDF 共 {total_pages} 页）"
+                    )
+
                 # E2-2: 先扫全书的页首/尾候选行（跨页重复 ≥60% 才判为 furniture）
                 furniture = self._detect_furniture(pdf) if drop_furniture else set()
 
-                out_pages: list[PageContent] = []
+                out_map: dict[int, PageContent] = {}
                 for idx, page in enumerate(pdf.pages, 1):
                     if selected and idx not in selected:
                         continue
-                    out_pages.append(
-                        self._parse_page(
-                            page, idx, total_pages, use_ocr, ocr_backend, ocr_min_confidence, furniture, two_column
-                        )
+                    out_map[idx] = self._parse_page(
+                        page, idx, total_pages, use_ocr, ocr_backend, ocr_min_confidence, furniture, two_column
                     )
+
+                # H16/audit: 保留请求顺序——selection 是 set 时输出曾按文档升序重排
+                if selection_order:
+                    out_pages = [out_map[i] for i in selection_order if i in out_map]
+                else:
+                    out_pages = [out_map[k] for k in sorted(out_map)]
 
                 # R2.3: 结构保真标注（标题层级/列表嵌套/目录锚点），管线唯一入口
                 if out_pages:
@@ -161,26 +177,15 @@ class PDFParser(BaseParser):
 
     @staticmethod
     def _parse_page_selection(pages: str | None) -> set[int] | None:
-        """解析 "1-3,7" 形式的页选择表达式为 1-based 页号集合。"""
-        if not pages or not pages.strip():
-            return None
-        selected: set[int] = set()
-        for part in pages.split(","):
-            part = part.strip()
-            if not part:
-                continue
-            if "-" in part:
-                lo_s, hi_s = part.split("-", 1)
-                lo, hi = int(lo_s), int(hi_s)
-                if lo < 1 or hi < lo:
-                    raise ValueError(f"非法页范围: {part}")
-                selected.update(range(lo, hi + 1))
-            else:
-                n = int(part)
-                if n < 1:
-                    raise ValueError(f"非法页号: {part}")
-                selected.add(n)
-        return selected or None
+        """解析 "1-3,7" 形式的页选择表达式为 1-based 页号集合。
+
+        H13/audit: 与 core/pdf_enhance.py::parse_pages_spec 统一为同一条解析路径/
+        同一套规则/同一错误 marker（此前这里自持一份解析器，错误措辞不同且被
+        ParseStep 吞掉）。
+        """
+        from core.pdf_enhance import parse_pages_spec
+
+        return parse_pages_spec(pages)
 
     #: furniture 判定：某行文本在全书出现于页首/尾的比例阈值
     _FURNITURE_RATIO = 0.6
