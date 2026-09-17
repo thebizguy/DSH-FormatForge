@@ -121,8 +121,6 @@ class ODFParser(BaseParser):
     def _process_text_body(self, parent: ET.Element, elements: list, raw_lines: list, elem_idx: list):
         """递归处理文本 body 中的子元素"""
         for child in parent:
-            tag = child.tag
-
             # H15/audit: 每个 child 独立处理——一个畸形 attribute 不能让整个文档中止
             # （此前 outline-level 等出现在 try 块之外，一路 abort 到底）
             try:
