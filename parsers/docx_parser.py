@@ -1,6 +1,10 @@
 """
-DOCX/DOC 文件解析器
-支持解析 Word 文档 (.doc, .docx)
+DOCX 文件解析器
+支持解析 Word 文档 (.docx)
+
+H18/audit: .doc（OLE2 旧格式）从未被 python-docx 支持——广告宣称已收缩，
+不再假装支持。extensionless OLE2 魔数也随之移除（旧版曾把无扩展名的
+.xls/.ppt 误路由到这里）。
 """
 
 import logging
@@ -25,17 +29,16 @@ except ImportError:
 
 
 class DOCXParser(BaseParser):
-    """DOCX/DOC 文件解析器"""
+    """DOCX 文件解析器"""
 
     @property
     def supported_extensions(self) -> list[str]:
-        return [".docx", ".doc"]
+        return [".docx"]
 
     @property
     def supported_magic(self) -> list[bytes]:
-        # DOCX 是 ZIP 格式
-        # DOC 是 OLE2 格式
-        return [b"PK\x03\x04", b"\xd0\xcf\x11\xe0"]
+        # DOCX 是 ZIP 格式；OLE2 魔数属于旧版 .doc/.xls/.ppt，不属于本解析器
+        return [b"PK\x03\x04"]
 
     def parse(self, file_path: Path) -> list[PageContent]:
         """解析 DOCX 文件"""

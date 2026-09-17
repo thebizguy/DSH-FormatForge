@@ -79,8 +79,9 @@ class EmailParser(BaseParser):
 
     @property
     def supported_magic(self) -> list[bytes]:
-        # EML 无固定魔数；MSG 是 OLE2 格式
-        return [b"\xd0\xcf\x11\xe0"] if MSG_AVAILABLE else []
+        # H18/audit: OLE2 魔数已移除——它属于 .doc/.ppt/.xls/.msg 四种格式且无法
+        # 区分，曾在无扩展名/收缩格式上把文件误路由到本解析器。.msg 由扩展名匹配。
+        return []
 
     def parse(self, file_path: Path) -> list[PageContent]:
         """解析邮件文件"""

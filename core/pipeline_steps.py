@@ -239,6 +239,13 @@ class ParseStep:
             logger.warning("[result_id=%s] 解析参数错误: %s", ctx.result_id, e)
             if "pages 参数格式错误" in str(e):
                 raise
+            if "不支持的文件类型" in str(e) and any(
+                ext in str(e) for ext in (".doc", ".ppt", ".xlsb")
+            ):
+                # H18/audit: 收缩格式（.doc/.ppt/.xlsb）无解析器——必须以失败上抛，
+                # 不能吞掉后走 raw 透传假装成功；入口分类为 unsupported_format。
+                # 注意 .tmp 是 stream 输入的自有后缀，不属于此列（保持原跳过行为）。
+                raise
             ctx.logs.append(create_processing_log("parse", f"解析失败: {e}", "warning"))
         except Exception as e:
             logger.warning("[result_id=%s] 文件解析失败: %s", ctx.result_id, e, exc_info=True)

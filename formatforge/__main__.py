@@ -117,6 +117,9 @@ def translate_file_data(
         err = ctx.error or "未知错误"
         if "pages 参数格式错误" in str(err):
             return {"kind": "bad_request", "message": str(err)}, 7
+        if "不支持的文件类型" in str(err):
+            # H18/audit: 无解析器的格式（.doc/.ppt/.xlsb 等）报 unsupported_format
+            return {"kind": "unsupported_format", "message": str(err)}, 3
         return {"kind": "parse_failed", "message": str(err)}, 4
     sd = getattr(result, "structuredData", None)
     # H1: pipeline 失败也会返回真实 ConvertResultData（_build_error_response 把错误文本
@@ -125,6 +128,9 @@ def translate_file_data(
     if isinstance(sd, dict) and sd.get("error"):
         if "pages 参数格式错误" in str(result.convertedContent):
             return {"kind": "bad_request", "message": result.convertedContent}, 7
+        if "不支持的文件类型" in str(result.convertedContent):
+            # H18/audit: 无解析器的格式报 unsupported_format（友好收缩后错误）
+            return {"kind": "unsupported_format", "message": result.convertedContent}, 3
         return {"kind": "parse_failed", "message": result.convertedContent}, 4
 
     data: dict[str, Any] = {

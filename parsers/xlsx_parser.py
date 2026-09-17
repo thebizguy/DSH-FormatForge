@@ -36,19 +36,22 @@ class XLSXParser(BaseParser):
 
     @property
     def supported_extensions(self) -> list[str]:
-        return [".xlsx", ".xls", ".xlsm", ".xlsb"]
+        # H18/audit: .xlsb 需要 pyxlsb（未声明依赖）——宣称已收缩；.xls 保留
+        # （有 xlrd 代码路径，未安装时报「请安装 xlrd」的明确指引）
+        return [".xlsx", ".xls", ".xlsm"]
 
     @property
     def supported_magic(self) -> list[bytes]:
-        # XLSX 是 ZIP 格式
-        # XLS 是 OLE2 格式
-        return [b"PK\x03\x04", b"\xd0\xcf\x11\xe0"]
+        # H18/audit: 仅 PK/ZIP（XLSX 真实魔数）。OLE2 魔数被移除——它无法区分
+        # .doc/.ppt/.xls，曾在无扩展名/收缩格式上把文件误路由到本解析器。
+        # 真正的 .xls 由扩展名匹配（xlrd 路径，未安装时报明确指引）。
+        return [b"PK\x03\x04"]
 
     def parse(self, file_path: Path) -> list[PageContent]:
         """解析 Excel 文件"""
         ext = file_path.suffix.lower()
 
-        if ext in [".xlsx", ".xlsm", ".xlsb"]:
+        if ext in [".xlsx", ".xlsm"]:
             return self._parse_xlsx(file_path)
         elif ext == ".xls":
             return self._parse_xls(file_path)

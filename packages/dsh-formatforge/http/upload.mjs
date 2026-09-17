@@ -18,7 +18,8 @@ import { statSync, existsSync, mkdirSync } from 'node:fs'
 import { createInboxWatcher, inboxDir } from '../services/inbox-watcher.mjs'
 
 const KNOWN_EXT = new Set([
-  '.pdf', '.docx', '.doc', '.pptx', '.xlsx', '.xlsm', '.csv', '.txt', '.md', '.markdown',
+  // H18/audit: .doc/.ppt/.xlsb 移除（无解析器，收缩宣称）——未知扩展交 CLI 报 unsupported_format
+  '.pdf', '.docx', '.pptx', '.xlsx', '.xlsm', '.csv', '.txt', '.md', '.markdown',
   '.rtf', '.odt', '.ods', '.odp', '.html', '.htm', '.xml', '.json', '.yaml', '.yml',
   '.toml', '.eml', '.msg', '.epub', '.svg', '.png', '.jpg', '.jpeg', '.gif', '.webp',
   '.bmp', '.tiff', '.zip', '.7z', '.rar', '.srt', '.sql', '.latex', '.tex',

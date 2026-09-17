@@ -1,6 +1,7 @@
 """
 通用文件解析模块
-支持解析 .ppt, .pptx, .pdf, .txt, .csv, .doc, .docx, .xls, .xlsx, 图片 等格式
+支持解析 .pptx, .pdf, .txt, .csv, .docx, .xls, .xlsx, 图片 等格式
+（H18/audit: .doc/.ppt/.xlsb 已从宣称中收缩——无可用解析器）
 采用插件化注册表架构，易于扩展新格式
 """
 
@@ -261,11 +262,11 @@ class FileParser:
         logger.debug("文件信息: name=%s, size=%d bytes", file_name, file_size)
 
         # 映射文件类型
+        # H18/audit: .doc/.ppt（OLE2 旧格式）无解析器——映射移除，交给
+        # unsupported_format 友好错误；.xls 保留（有 xlrd 代码路径）
         type_mapping = {
-            "ppt": FileType.PPT,
             "pdf": FileType.PDF,
             "image": FileType.IMAGE,
-            "doc": FileType.DOC,
             "txt": FileType.TXT,
             "csv": FileType.CSV,
             "xls": FileType.XLS,
@@ -273,7 +274,6 @@ class FileParser:
         # 根据扩展名补充映射
         ext = file_path.suffix.lower()
         ext_mapping = {
-            ".ppt": FileType.PPT,
             ".pptx": FileType.PPT,
             ".pdf": FileType.PDF,
             ".jpg": FileType.IMAGE,
@@ -284,7 +284,6 @@ class FileParser:
             ".webp": FileType.IMAGE,
             ".tiff": FileType.IMAGE,
             ".tif": FileType.IMAGE,
-            ".doc": FileType.DOC,
             ".docx": FileType.DOC,
             ".txt": FileType.TXT,
             ".text": FileType.TXT,

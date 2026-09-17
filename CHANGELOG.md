@@ -7,6 +7,22 @@
 
 ## [Unreleased]
 
+### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
+
+- `.doc/.ppt/.xlsb` 从宣称中移除（python-docx/python-pptx/openpyxl 均不支持，
+  且 pyproject 未声明对应依赖）；这三个扩展名现在走友好的 `unsupported_format`
+  错误（exit 3），不再是「openpyxl 不支持此格式」式误导。
+- **OLE2 误路由修复**：`docx_parser` / `pptx_parser` / `xlsx_parser` /
+  `email_parser` 全部移除 OLE2 魔数宣称——该魔数无法区分 .doc/.ppt/.xls/.msg，
+  注册顺序曾把无扩展名/收缩格式误路由到 DOCXParser。真正的 .xls/.msg 仍由
+  扩展名匹配服务（.xls 有 xlrd 代码路径；.msg 依赖已声明的 extract-msg）。
+- `ParseStep` 对收缩格式的「不支持的文件类型」失败不再吞掉后走 raw 透传假装
+  成功——改为上抛（`.tmp` stream 输入的自有后缀保持原跳过行为）。
+- HTTP 上传白名单同步移除 `.doc`。
+- 回归测试：`test_h18_advertised_formats.py`（收缩 + 无解析器 + unsupported
+  kind 端到端），`test_pptx_parser.py` 断言更新。
+- `.xls/.xlsb/.msg` 的真实解析器作为 extras 后续项（xlrd/pyxlsb 未声明）。
+
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
 > 一个 commit 对应一项修复（commit 备注 `fix(H<id>)`）；协议 todo：stdout 仍是唯一的 JSON 出口。
