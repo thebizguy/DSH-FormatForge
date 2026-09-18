@@ -23,6 +23,16 @@
   kind 端到端），`test_pptx_parser.py` 断言更新。
 - `.xls/.xlsb/.msg` 的真实解析器作为 extras 后续项（xlrd/pyxlsb 未声明）。
 
+### 1.0.3 — Atria 审计「Medium」批次修复（进行中；不发布）
+
+> 与 1.0.2 相同约定：一个 commit 一项修复（`fix(FF-M<n>)`），每个修复自带回归测试；
+> stdout 仍是唯一 JSON 出口。
+
+- **FF-M-pages 选项误转发**：`pages`/`encoding` 曾被 `**pdf_options` 盲传给 22 个
+  解析器中不声明对应形参的 18 个 → `TypeError` → 被 ParseStep 吞掉后退化为 raw
+  透传垃圾。现按 `inspect.signature` 过滤，只转发解析器真正接受的选项，被丢弃的
+  选项记 INFO 日志（`core/file_parser.py`）。
+
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
 > 一个 commit 对应一项修复（commit 备注 `fix(H<id>)`）；协议 todo：stdout 仍是唯一的 JSON 出口。
