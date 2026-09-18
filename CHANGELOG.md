@@ -7,6 +7,23 @@
 
 ## [Unreleased]
 
+### 1.0.3 — Atria 审计「JS 层」修复批次（JS-H1…JS-H8；进行中；不发布）
+
+> 与 Python 批次相同约定：一个 commit 一项修复（`fix(JS-H<n>)`），每个修复自带回归
+> 测试；JS 层无构建步骤，修复在**下一次 ff_* 工具调用**时即生效（无需重启）。
+
+- **JS-H1 协议键漂移（头条）**：`tools/result.mjs` 读的是 `data.convertedContent`、
+  `data.resultId`、`data.fileInfo.*`、`data.confidence` —— Python round-1 协议实际发的是
+  `data.content` + `data.meta.{result_id, parser, file_size, confidence}`，且**不存在**
+  `fileInfo`。后果：`ff_result` 取回正文**永远为空**却报 `ok:true`，`notify.mjs` 广告的
+  result_id 在头扫描里也永远匹配不上（`"resultId"` vs `"result_id"`）——拖入→通知→取回
+  的主链路端到端断死。现全部对齐真实协议键，删除 `fileInfo` 兜底，list 行与 confidence
+  一并改读 `meta.*`；id 查找改为：旧式精确 stem → 新式精确 stem → 源 stem 前缀 →
+  `meta.result_id`（精确 + ≥8 位前缀）。顺带修 `Math.max(200, max_chars)` 静默覆盖
+  （<200 的显式 `max_chars` 被抬到 200）与非整数参数不取整。回归测试
+  `test/test-result-protocol.mjs`：合成真实协议形状的 `.ff.json` 产物，断言取回非空
+  content 与正确 parser/confidence（23 项断言，失败非零退出）。
+
 ### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
 
 - `.doc/.ppt/.xlsb` 从宣称中移除（python-docx/python-pptx/openpyxl 均不支持，

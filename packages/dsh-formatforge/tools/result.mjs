@@ -33,20 +33,22 @@ function listArtifacts() {
     try {
       const st = statSync(full)
       const head = readFileSync(full, { encoding: 'utf8' }).slice(0, 2048)
-      let meta = {}
+      let env = {}
       try {
         const j = JSON.parse(head.endsWith('}') ? head : head.slice(0, head.lastIndexOf('}') + 1))
-        meta = j.data || j
+        env = j.data || j
       } catch { /* truncated head — leave empty */ }
-      const fileInfo = meta.fileInfo || {}
+      // round-1 H1 协议：成功信封 {ok, code, data:{content, format, meta:{parser, file_size, result_id, confidence}}}
+      // 源文件名不入协议——由产物文件名承载（`foo.pdf.ff.json` → 源 `foo.pdf`）
+      const meta = env.meta || {}
       rows.push({
-        id: meta.resultId || name.replace(/\.ff\.json$/, ''),
+        id: meta.result_id || name.replace(/\.ff\.json$/, ''),
         file: name,
-        source: fileInfo.fileName || name.replace(/\.ff\.json$/, ''),
-        parser: fileInfo.fileType || '?',
-        pages: fileInfo.pageCount ?? 0,
+        source: name.replace(/\.ff\.json$/, ''),
+        parser: meta.parser || '?',
+        pages: meta.pages ?? null,
         confidence: typeof meta.confidence === 'number' ? meta.confidence : null,
-        enhance: meta.enhance?.reason || null,
+        enhance: env.enhance?.reason || null,
         forged_at: st.mtime.toISOString(),
         size_bytes: st.size,
         path: full,
@@ -163,22 +165,30 @@ async function fetchOne(rawId, args, log) {
   try {
     const names = readdirSync(dir).filter((n) => n.endsWith('.ff.json'))
     // v0.13.0/C6: 删 includes() 兜底（id="abc" 会命中 xxxabcxxx.ff.json 是误匹配）
-    // 三段递进：精确 file stem → 前缀（如 resultId 前 8 位）→ JSON 头里的 resultId
+    // 四段递进：旧式精确 stem（foo.ff.json）→ 新式精确 stem（foo.pdf.ff.json，含源扩展名）
+    //          → 源 stem 前缀（foo → foo.pdf）→ JSON 头里的 result_id（精确，再 8 位以上前缀）
+    const stemOf = (n) => n.replace(/\.ff\.json$/, '')
     target =
       names.find((n) => n === `${rawId}.ff.json`) ||
-      names.find((n) => n.startsWith(`${rawId}.ff.`)) ||
+      names.find((n) => stemOf(n) === rawId) ||
+      names.find((n) => stemOf(n).startsWith(`${rawId}.`)) ||
       null
     if (!target && names.length > 0) {
+      let idPrefixHit = null
       for (const n of names) {
         try {
           const head = readFileSync(join(dir, n), { encoding: 'utf8' }).slice(0, 512)
-          // 精确匹配 resultId（JSON 头里 "resultId": "cvt..." 字段）
-          if (head.includes(`"resultId": "${rawId}"`)) {
+          // 精确匹配协议里的 result_id（"result_id": "cvt..."；兼容旧写法 resultId）
+          const m = head.match(/"(?:result_id|resultId)"\s*:\s*"([^"]*)"/)
+          if (!m) continue
+          if (m[1] === rawId) {
             target = n
             break
           }
+          if (!idPrefixHit && rawId.length >= 8 && m[1].startsWith(rawId)) idPrefixHit = n
         } catch { /* skip */ }
       }
+      if (!target && idPrefixHit) target = idPrefixHit
     }
   } catch {
     target = null
@@ -199,9 +209,12 @@ async function fetchOne(rawId, args, log) {
     return { ok: false, code: 4004, error: { kind: 'parse_failed', message: `产物损坏无法解析: ${e.message}` } }
   }
   const data = doc.data || {}
-  const content = typeof data.convertedContent === 'string' ? data.convertedContent : ''
-  const maxChars = Math.max(200, Number(args.max_chars) || DEFAULT_MAX_CHARS)
-  const start = Math.max(0, Number(args.offset) || 0)
+  const meta = data.meta || {}
+  const content = typeof data.content === 'string' ? data.content : ''
+  // 参数归一：0/负数/非数回落到默认（`max_chars: 0` 在调用方=未指定），非整数向下取整
+  const rawMax = Number(args.max_chars)
+  const maxChars = Number.isFinite(rawMax) && rawMax > 0 ? Math.floor(rawMax) : DEFAULT_MAX_CHARS
+  const start = Math.max(0, Math.floor(Number(args.offset) || 0))
   const { chunk, nextOffset } = smartTruncate(content, maxChars, start)
 
   log(`[ff_result] fetched ${target} (${chunk.length} chars @${start})`)
@@ -209,11 +222,12 @@ async function fetchOne(rawId, args, log) {
     ok: true,
     code: 200,
     data: {
-      id: data.resultId || target.replace(/\.ff\.json$/, ''),
+      id: meta.result_id || target.replace(/\.ff\.json$/, ''),
       file: basename(target),
-      source: data.fileInfo?.fileName || '',
-      parser: data.fileInfo?.fileType || '?',
-      confidence: data.confidence ?? null,
+      source: target.replace(/\.ff\.json$/, ''),
+      parser: meta.parser || '?',
+      confidence: typeof meta.confidence === 'number' ? meta.confidence : null,
+      file_size: meta.file_size ?? null,
       enhance: data.enhance || null,
       md_path: full.replace(/\.ff\.json$/, '.ff.md'),
       content: chunk,
