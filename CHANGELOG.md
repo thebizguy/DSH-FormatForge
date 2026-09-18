@@ -45,6 +45,11 @@
   `errors="replace"` 让损坏字节以 U+FFFD 可见；兜底/未验证编码在
   `PageContent.metadata` 标记 `encoding_verified=False` / `lossy_decode=True`
   并记 warning，不再假装解码成功（`parsers/txt_parser.py`）。
+- **FF-M-quality 覆盖率不再是空头数字**：`text_coverage` 曾只看
+  `len(content)/file_size`，失败后的 raw 字节透传与二进制乱码同样满足阈值、
+  与真实文本一起拿 100 分。现以「内容像文本的证据强度」（可打印字符比例，
+  U+FFFD/控制字符不计入；字母/数字/CJK 占比 <5% 的符号堆再折 30%）作乘子，
+  并把证据指标写进 warning（`core/quality_report.py`）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
