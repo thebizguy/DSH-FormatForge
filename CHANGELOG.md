@@ -50,6 +50,13 @@
   与真实文本一起拿 100 分。现以「内容像文本的证据强度」（可打印字符比例，
   U+FFFD/控制字符不计入；字母/数字/CJK 占比 <5% 的符号堆再折 30%）作乘子，
   并把证据指标写进 warning（`core/quality_report.py`）。
+- **FF-M-docx 静默丢正文**：解析循环只认 body 直接子节点的 `w:p`/`w:tbl`，
+  `w:sdt`（内容控件）里的段落/表格被整段丢弃；`Paragraph.text` 只拼接直接
+  `w:r`，`w:ins` 追踪插入与 `w:hyperlink` 文字从正文消失（只活在 revisions
+  元数据里）；单个畸形元素抛异常会废掉整篇文档。现按块遍历并递归进入
+  `w:sdtContent`，按 `w:t` 收集段落文本（插入文本**合并**展示并在
+  `metadata.tracked_insert` 标记；`w:delText` 天然排除），逐元素隔离并把跳过的
+  元素记进 `metadata.skipped_elements`（`parsers/docx_parser.py`）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
