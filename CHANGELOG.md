@@ -32,6 +32,11 @@
   解析器中不声明对应形参的 18 个 → `TypeError` → 被 ParseStep 吞掉后退化为 raw
   透传垃圾。现按 `inspect.signature` 过滤，只转发解析器真正接受的选项，被丢弃的
   选项记 INFO 日志（`core/file_parser.py`）。
+- **FF-M-riff 容器误判**：`b"RIFF"` 曾无条件判为 WEBP（且以 0.95 置信度**早于**
+  扩展名分支返回）→ 无扩展名乃至 `.wav` 的 WAV/AVI 被当图片喂给图片解析器。
+  现按偏移 8..12 的 form type 分派（`WEBP`→webp、`WAVE`→audio/wav、
+  `AVI `→binary video）；未知子类型只以 0.6 置信度宣称 RIFF 容器，让扩展名分支
+  仍能生效（`core/format_detector.py`）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
