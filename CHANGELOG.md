@@ -91,6 +91,16 @@
   回归测试 `test/test-runner-env-stderr.mjs`（25 项断言：假密钥不泄漏、旋钮透传、
   traceback 中段内容（含写在中间帧里的假 token）不进摘要）；另实测最小环境下真实
   转换仍成功（txt → markdown，content/meta.result_id 正常）。
+- **JS-H8 `test-inbox.mjs` 变成真正的测试**：此前它硬编码作者的机器路径
+  （`E:/项目/DSH-FormatForge`）、**从不调用 `ff_result`**、且所有检查都只是
+  `console.log` 一个布尔值——头条的 JS-H1 协议键漂移正是这样漏掉的（看起来全绿，
+  断言全无）。现在：路径从仓库布局推导（`join(here,'..','..')`）、**真实调用
+  `ff_result` 取回正文并比对 `.ff.md` 产物 / parser / confidence / file_size**、
+  每条检查都是断言且失败非零退出（39 项）。同批补上此前零覆盖的分支：
+  JS-H3 `too_large` 跨 5 个 tick 只通知一次、JS-H4 同 stem 不同扩展名各自保留产物与
+  正文、CLI 失败 → `.ff.error.txt`（`timeoutMs=50` 强制超时命中 timeout 分支）、
+  重启不重放、retention → `.ff.retired.log`。fixture 用临时 `FF_HOME` 隔离，
+  退出时清理（含 M19：只清理自己创建的 stub `node_modules`）。
 
 ### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
 
