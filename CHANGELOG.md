@@ -118,6 +118,12 @@
   记 INFO 并回退 utf-8），multipart 与非 multipart 四处调用点全部收口
   （`parsers/email_parser.py`）。MSG 路径仍依赖未安装的 `extract-msg`（dead
   path，见汇总文档遗留项）。
+- **FF-M-misc `test_format_capabilities` 陈旧断言**：该测试把 ff_formats 的允许
+  格式硬编码成一份手抄快照，注册表新增 `7z`/`rar`/`rtf`（三者都是 `DataFormat`
+  成员且各有真实 parser）后必然失败——**是测试过期，不是实现回归**（H18 的
+  `.doc/.ppt/.xlsb` 收缩已正确反映：三者都不在 advertised 集合内）。现改为按权威
+  来源断言意图：advertised ⊆ `DataFormat` 值、不含扩展名别名、每个 format 都有
+  parser 声明，并显式锁住 H18 收缩决策（`test/unit/test_format_capabilities.py`）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
