@@ -3,8 +3,10 @@ FormatForge CLI 入口
 
 协议契约（JS 侧 python-runner 依赖此形状，勿随意改动）：
     成功: {"ok": true,  "code": 200, "data": {content, format, meta, quality?, enhance?}}
-    失败: {"ok": false, "code": <int>, "error": {"kind": str, "message": str}}
-退出码: 0 成功 / 2 参数错 / 3 解析失败 / 4 超限
+    失败: {"ok": false, "code": <4000+exit>, "error": {"kind": str, "message": str}}
+退出码（权威定义见 core/errors.py::EXIT_CODES）:
+    0 成功 / 2 文件不存在·是目录·无权限 / 3 格式不支持 / 4 解析失败 /
+    5 超时 / 6 超出大小上限 / 7 参数错误 / 70 内部错误
 """
 
 from __future__ import annotations
@@ -30,13 +32,30 @@ EXIT_OK = 0
 # M4: 错误码协议固化（core/errors.py 为唯一权威；旧 kind 字符串映射到新枚举）
 from core.errors import ErrorCode, exit_code_of  # noqa: E402
 
+#: 旧 kind 字符串 → ErrorCode（表内只有「不是 ErrorCode 值」的历史别名；
+#: 其余 kind 由 _kind_to_code 直接按枚举值解析）
 _LEGACY_KIND = {
     "not_found": ErrorCode.FILE_NOT_FOUND,
-    "is_directory": ErrorCode.IS_DIRECTORY,
-    "unsupported_format": ErrorCode.UNSUPPORTED_FORMAT,
-    "parse_failed": ErrorCode.PARSE_FAILED,
-    "too_large": ErrorCode.TOO_LARGE,
+    # FF-M-kinds/audit: 以下别名此前缺失，而上游（管道 error payload、batch）
+    # 会按新值语义传 kind（file_not_found / bad_request / permission_denied /
+    # timeout）——它们查不到就被 remap 成 INTERNAL(70)，JS 侧据此判错类型。
+    "file_not_found": ErrorCode.FILE_NOT_FOUND,
+    "permission_denied": ErrorCode.PERMISSION_DENIED,
+    "bad_request": ErrorCode.BAD_REQUEST,
+    "timeout": ErrorCode.TIMEOUT,
 }
+
+
+def _kind_to_code(kind: str) -> ErrorCode:
+    """kind 字符串 → ErrorCode。
+
+    先按枚举值精确匹配（新值语义，含 file_not_found/bad_request 等），失败再退
+    到历史别名表，最后兜底 INTERNAL。未知 kind 不再静默变 70 却不留痕迹。
+    """
+    try:
+        return ErrorCode(kind)
+    except ValueError:
+        return _LEGACY_KIND.get(kind, ErrorCode.INTERNAL)
 
 
 from formatforge.batch import cmd_batch  # noqa: E402  (须在 sys.path 注入之后)
@@ -51,7 +70,7 @@ def _emit(payload: dict[str, Any]) -> None:
 
 def _fail(kind: str, message: str, *, code: ErrorCode | None = None) -> int:
     """失败出口。kind 为旧字符串兼容参数；优先用 code 枚举。"""
-    ec = code or _LEGACY_KIND.get(kind, ErrorCode.INTERNAL)
+    ec = code or _kind_to_code(kind)
     exit_code = exit_code_of(ec)
     err = {"kind": ec.value, "message": message}
     _emit({"ok": False, "code": 4000 + exit_code, "error": err})
@@ -544,7 +563,10 @@ def main(argv: list[str] | None = None) -> int:
             _emit({"ok": True, "code": 200, "data": {"help": usage_text}})
             return EXIT_OK
         if isinstance(e.code, int) and e.code != 0:
-            return _fail("internal", f"参数错误（exit {e.code}）。试 --help 看用法。")
+            # FF-M-kinds/audit: argparse 的参数错误此前报 internal(70)，
+            # 与 errors.py 的 bad_request(7) 语义不符（且让调用方无法区分
+            # 「用法错误」和「内部崩溃」）。
+            return _fail("bad_request", f"参数错误（exit {e.code}）。试 --help 看用法。")
         raise
     finally:
         sys.stdout = _saved_stdout
@@ -553,7 +575,18 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result_code = int(args.func(args))
     except SystemExit as e:
-        result_code = int(e.code or 0) if isinstance(e.code, (int, str)) else exit_code_of(ErrorCode.BAD_REQUEST)
+        # FF-M-kinds/audit: 原 `int(e.code or 0)` 在 SystemExit("用法提示") 上会抛
+        # ValueError——异常处理器内再抛异常不会被下面的 except Exception 接住，
+        # 于是「已知的参数错误」变成无协议 JSON 的 traceback。这里显式分类。
+        code = e.code
+        if code is None:
+            result_code = EXIT_OK
+        elif isinstance(code, int):
+            result_code = code
+        else:
+            # 字符串 SystemExit 不是正常出口协议，命令也不会输出协议 JSON；
+            # 这里补一条 bad_request 保证 stdout 仍只有一条合法 JSON。
+            return _fail("bad_request", f"命令中止: {code}")
     except BrokenPipeError:
         return EXIT_OK
     except Exception as e:  # 兜底：任何未捕获异常都以协议 JSON 报告

@@ -97,6 +97,17 @@
   异常都留下泄漏文件，现统一在 `finally` 清理；顺带修正该失败路径的
   `from ocr_engine import OcrResult`（本仓库只有 `core.ocr_engine`，原写法让
   OCR 兜底直接 `ModuleNotFoundError`）。
+- **FF-M-kinds 错误 kind/退出码分类**：`file_not_found` / `bad_request` /
+  `permission_denied` / `timeout` 曾不在 `_LEGACY_KIND` 内 → 上游按新值语义传来的
+  kind 全被 remap 成 `internal`(exit 70)，调用方无法区分「文件不存在」「参数错」
+  与内部崩溃。现 `_fail` 先按 `ErrorCode` 枚举值精确解析（不变量有回归测试），
+  再退到历史别名表；argparse 的用法错误改报 `bad_request`(exit 7)；
+  `SystemExit("字符串")` 不再因 `int()` 抛 `ValueError` 变成无协议 JSON 的
+  traceback（补一条 `bad_request` JSON）；入口 docstring 的退出码表与
+  `core/errors.py` 对齐（`formatforge/__main__.py`）。
+- **FF-M-logging stdout 污染**：`setup_logging` 的 `StreamHandler` 曾绑
+  `sys.stdout`（当前零调用方，但一旦被调用就会破坏「stdout 只有一条协议 JSON」
+  契约），改为 `sys.stderr`（`core/logging_config.py`）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
