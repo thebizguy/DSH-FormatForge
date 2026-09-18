@@ -108,6 +108,16 @@
 - **FF-M-logging stdout 污染**：`setup_logging` 的 `StreamHandler` 曾绑
   `sys.stdout`（当前零调用方，但一旦被调用就会破坏「stdout 只有一条协议 JSON」
   契约），改为 `sys.stderr`（`core/logging_config.py`）。
+- **FF-M-email 附件物化 + 正文字符集**：① 附件此前只为算一个字节数就
+  `len(part.get_payload(decode=True) or b"")`，把任意大小附件完整解码进内存；
+  现 base64 按编码长度换算（零解码、含 padding 与折行处理），其他 CTE 超过
+  `ATTACHMENT_SIZE_CAP_BYTES`(8 MiB) 只报下限并以 `size_exact=False` 标记，
+  摘要显示为 `NNNKB+`；损坏 CTE 不再让整封邮件失败。② 正文解码把
+  `get_content_charset()` 直接交给 `bytes.decode` → 未知字符集抛 `LookupError`
+  被 ParseStep 吞掉后退化成 raw 透传假成功；现统一走 `_decode_body`（未知字符集
+  记 INFO 并回退 utf-8），multipart 与非 multipart 四处调用点全部收口
+  （`parsers/email_parser.py`）。MSG 路径仍依赖未安装的 `extract-msg`（dead
+  path，见汇总文档遗留项）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
