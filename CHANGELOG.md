@@ -41,6 +41,11 @@
   `test/test-python-runner-stdin.mjs`：正常路径仍成功 + 早退子进程 + 4MB stdin
   必须被 EOF/EPIPE 打中且 runFormatForge 仍 resolve、零未捕获异常。
   （未加监听时同一场景实测抛出 `uncaughtException: EOF` —— 已用未加固副本验证。）
+- **JS-H3 `too_large` 无限重转/重通知**：`processOne` 的 `too_large` 早退分支是唯一
+  漏记 `doneAt` 的终态 → 超限文件每隔一个 tick 重写 `.ff.error.txt` 并**再次**向所有
+  活会话发通知，永无止境（实测 11s 内 2 次且持续增长）。现在该分支也
+  `doneAt.set(name, statSync(full).mtimeMs)`，语义与成功/失败路径一致：只有源文件
+  size/mtime 变化才会重新处理。（行为回归覆盖随 JS-H8 的 `test-inbox.mjs` 重写落地。）
 
 ### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
 

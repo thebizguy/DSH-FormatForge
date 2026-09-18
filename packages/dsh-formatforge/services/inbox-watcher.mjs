@@ -147,6 +147,10 @@ export function createInboxWatcher({ repoRoot, maxBytes = 100 * 1024 * 1024, tim
     if (size > maxBytes) {
       const msg = `文件 ${size} 字节超过上限 ${maxBytes}`
       writeFileSync(errPath, `[too_large] ${msg}`)
+      // JS-H3: 终态必须记 doneAt —— 此前这是 processOne 里唯一漏记的分支，
+      // 于是超限文件每个 tick 都重写错误文件 + 重发通知，永无止境。
+      // 语义与成功/失败路径一致：源文件 size/mtime 变了才会重新处理（这是对的）。
+      doneAt.set(name, statSync(full).mtimeMs)
       onDone?.({ file: name, ok: false, kind: 'too_large', message: msg })
       return
     }
