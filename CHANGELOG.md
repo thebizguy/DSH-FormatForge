@@ -31,6 +31,16 @@
   同时修 list 的 2KB 头部解析：协议里 `meta` 排在 `content` **之后**，>2KB 的真实产物
   原本一律显示 `parser=?`/`confidence=null`；现在小产物整段解析、大产物只读首 64B + 尾
   4KB（不把整份正文读进内存），result_id 查找也走同一读取器（大产物按 id 取回原先必失败）。
+- **JS-H2 stdin EPIPE 崩溃向量**：`child.stdin.write/end` 没有任何 `'error'` 监听，而
+  Python 子进程完全可能在消费 stdin 前就退出（坏 repoRoot → ModuleNotFoundError、
+  argparse 报错、任何早退）→ stdin 流 emit `'error'`(EOF/EPIPE)。这不是 promise
+  rejection（宿主的 `unhandledRejection` 兜底不管用），也没有 `uncaughtException`
+  兜底 → **直接打死活着的 harness 进程**。现写入前给 child 三条 stdio 流都挂上
+  no-throw 的 `'error'` 监听并 try/catch 包住 write/end；同族的两处裸 spawn 也补齐
+  监听（`runVersion` 的探测子进程、`killTree` 的 taskkill）。回归测试
+  `test/test-python-runner-stdin.mjs`：正常路径仍成功 + 早退子进程 + 4MB stdin
+  必须被 EOF/EPIPE 打中且 runFormatForge 仍 resolve、零未捕获异常。
+  （未加监听时同一场景实测抛出 `uncaughtException: EOF` —— 已用未加固副本验证。）
 
 ### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
 

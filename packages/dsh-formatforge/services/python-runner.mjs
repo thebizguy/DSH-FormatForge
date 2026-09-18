@@ -47,6 +47,11 @@ function runVersion(python) {
     let out = ''
     child.stdout.on('data', (d) => (out += d))
     child.stderr.on('data', (d) => (out += d))
+    // JS-H2 同族：探测用的子进程 stdio 也必须有 'error' 监听（FF_PYTHON 指向坏路径时
+    // 流会被销毁，裸 'error' 事件 = 进程级未捕获异常）
+    child.stdin.on('error', () => {})
+    child.stdout.on('error', () => {})
+    child.stderr.on('error', () => {})
     child.on('error', () => resolve(null))
     child.on('close', (code) => {
       if (code !== 0) return resolve(null)
@@ -100,7 +105,9 @@ export function findRepoRoot(hintDir) {
 function killTree(child) {
   if (IS_WIN) {
     try {
-      spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
+      const killer = spawn('taskkill', ['/PID', String(child.pid), '/T', '/F'], { windowsHide: true })
+      // JS-H2 同族：spawn 出的 killer 若无 'error' 监听，taskkill 缺失时会抛未捕获异常
+      killer.on('error', () => {})
     } catch { /* noop */ }
   } else {
     try { child.kill('SIGKILL') } catch { /* noop */ }
@@ -154,6 +161,15 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
       if (stderr.length > 64_000) stderr = stderr.slice(-32_000)
     })
 
+    // JS-H2: 子进程可能在消费 stdin 前就退出（repoRoot 错 → ModuleNotFoundError、
+    // argparse 报错、任何早退）→ stdin 流 emit 'error'(EPIPE)。这不是 promise
+    // rejection，宿主也没有 uncaughtException 兜底 → 会直接打死活着的 harness 进程。
+    // 所有 child stdio 流都必须有 no-throw 的 'error' 监听（写入前挂好）。
+    const onStdioError = (e) => log?.(`[dsh-formatforge] child stdio ${e?.code || 'error'}: ${e?.message || e}`)
+    child.stdin.on('error', onStdioError)
+    child.stdout.on('error', onStdioError)
+    child.stderr.on('error', onStdioError)
+
     const fail = (kind, message) => ({ ok: false, code: -1, error: { kind, message } })
 
     child.on('error', (e) => {
@@ -185,9 +201,17 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
     })
 
     if (stdinText != null) {
-      child.stdin.write(stdinText)
+      try {
+        child.stdin.write(stdinText)
+      } catch (e) {
+        log?.(`[dsh-formatforge] stdin write failed: ${e.message}`)
+      }
     }
-    child.stdin.end()
+    try {
+      child.stdin.end()
+    } catch (e) {
+      log?.(`[dsh-formatforge] stdin end failed: ${e.message}`)
+    }
   })
 }
 
