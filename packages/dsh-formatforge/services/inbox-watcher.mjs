@@ -51,10 +51,13 @@ function isSupported(name) {
 // 与 Python 侧一样用「结构性唯一键」而不是计数器/哈希来保证不撞。
 // 去重护栏：仅当同目录存在**另一个**源文件在大小写不敏感比较下同名（大小写敏感
 // 文件系统 + 大小写不敏感期望，或 Unicode 归一化）时才补源名短哈希；正常永不触发。
-const ARTIFACT_TAILS = ['.ff.json', '.ff.md', '.ff.error.txt']
+const ARTIFACT_TAILS = ['.ff.json', '.ff.md', '.ff.error.txt', '.ff.retired.log']
 
-function isArtifactName(name) {
-  return ARTIFACT_TAILS.some((t) => name.endsWith(t))
+export function isArtifactName(name) {
+  // 大小写不敏感：Windows/macOS 上 `x.FF.JSON` 就是 `x.ff.json` 同一个文件，
+  // 上传口也要用它挡住大小写变体的伪造产物名
+  const lower = String(name ?? '').toLowerCase()
+  return ARTIFACT_TAILS.some((t) => lower.endsWith(t))
 }
 
 /**

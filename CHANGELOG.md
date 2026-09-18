@@ -65,6 +65,20 @@
   顺带按审计建议把绝对路径的**家目录前缀（含用户名）打码为 `~`**，避免用户名与无关
   项目路径进入会话记录/LLM provider。回归测试 `test/test-notify-sanitize.mjs`
   （对抗性文件名 + 注入点兜底 + 正文不外泄不变量，14 项断言）。
+- **JS-H6 上传路由 Origin 校验（DNS rebinding）**：`/formatforge/upload` 只服务环回，
+  但**完全没有 Origin 检查**——经典 CSRF 只是碰巧被一个规范非法的 ACAO 值
+  （`'same-origin'`，任何浏览器都不接受）挡住，而 DNS rebinding 能让攻击者域名发出的
+  POST 被浏览器当作同源请求打进来。现在：`Origin` 存在且不是本机
+  （`localhost`/`127.0.0.1`/`[::1]`，任意端口，http/https）→ 403 `forbidden_origin`
+  且不落盘；`Origin: null` 同样拒绝；**缺 Origin 的非浏览器客户端照常放行**（它们无法被
+  网页 drive-by 驱动）。preflight 改为回显校验通过的 Origin（修掉规范非法值）。
+  同批修掉上传口两个同族问题：**M11** 产物形状的文件名（`x.ff.json` / `x.FF.MD`，
+  大小写不敏感）在上传口直接 415 `artifact_name_rejected`——伪造产物不再能绕过转换
+  躺进收件箱（`.json` 作为**源文档**仍照常接受）；`basename()` 遇 NUL 抛
+  `ERR_INVALID_ARG_VALUE`、CR/LF 一路进文件名的问题改为先剥控制字符；
+  `existsSync`→`writeFileSync` 的 TOCTOU 改为 `flag:'wx'` 原子创建 + EEXIST 追加序号。
+  回归测试 `test/test-upload-origin.mjs`（18 项断言，含环回/外部/伪造/lookalike
+  Origin、产物名拒收、NUL 文件名、同名不覆盖）。
 
 ### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
 
