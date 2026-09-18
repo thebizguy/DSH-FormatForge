@@ -86,6 +86,17 @@
   > ⚠️ 行为变更：不再默认允许任意路径写盘；需要写到声明根之外时请设置
   > `FF_OUTPUT_ROOT`。`batch --out` 的同类无沙箱写仍 open（刻意不在本批次扩大
   > 改动面，见 secondary 汇总文档的 deferral 列表）。
+- **FF-M-pdf 加密 PDF 报错 + 临时 PNG 泄漏**：① 加密 PDF 此前没有密码路径，被
+  笼统包成 `ValueError`（措辞无稳定标记）→ 被 `ParseStep` 吞掉 → `ConvertStep`
+  把原始 PDF 字节当 `content` 返回（error-as-success）。现按异常链（含
+  pdfplumber 的 `PdfminerException(e)` 包装层）识别加密/密码失败，抛含
+  `password-protected` 稳定标记的明确错误，`ParseStep` 对该标记上抛，入口报
+  `parse_failed`（exit 4）；`is_extractable=False` 的「可打开但禁止提取」同样
+  显式报错（`parsers/pdf_parser.py`、`core/pipeline_steps.py`）。
+  ② `_ocr_page` 的临时 PNG（`delete=False`）此前只在成功路径 unlink → 任何 OCR
+  异常都留下泄漏文件，现统一在 `finally` 清理；顺带修正该失败路径的
+  `from ocr_engine import OcrResult`（本仓库只有 `core.ocr_engine`，原写法让
+  OCR 兜底直接 `ModuleNotFoundError`）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 

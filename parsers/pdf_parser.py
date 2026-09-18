@@ -15,6 +15,17 @@ from parsers import BaseParser
 
 logger = logging.getLogger("parsers.pdf")
 
+#: FF-M-pdf/audit: 加密 PDF 的稳定标记。ParseStep 依赖它把错误上抛（而不是吞掉
+#: 之后退化成 raw 透传假成功），入口据此报 parse_failed。
+PDF_PASSWORD_MARKER = "password-protected"
+
+#: 判为「加密/密码」失败的异常类名（pdfminer / pypdf / PyPDF2 系）
+_PASSWORD_ERROR_NAMES = frozenset(
+    {"PDFEncryptionError", "PDFPasswordIncorrect", "FileNotDecryptedError", "PdfReadError"}
+)
+#: 兜底文本线索（小写匹配）
+_PASSWORD_ERROR_HINTS = ("password", "decrypt", "encrypt")
+
 # 可选依赖
 try:
     import pdfplumber as _pdfplumber_module
@@ -43,6 +54,54 @@ try:
     IMAGE_AVAILABLE = True
 except ImportError:
     IMAGE_AVAILABLE = False
+
+
+def _iter_exc_chain(exc: BaseException) -> list[BaseException]:
+    """展开异常链（外层→内层）：含 ``__cause__``/``__context__`` 与 args 包装。
+
+    pdfplumber 用 ``PdfminerException(e)`` 把 pdfminer 异常塞进 ``args``，所以
+    只看 ``isinstance`` 不够。
+    """
+    seen: set[int] = set()
+    queue: list[BaseException] = [exc]
+    chain: list[BaseException] = []
+    while queue:
+        cur = queue.pop(0)
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        chain.append(cur)
+        for attr in ("__cause__", "__context__"):
+            nxt = getattr(cur, attr, None)
+            if isinstance(nxt, BaseException):
+                queue.append(nxt)
+        for arg in getattr(cur, "args", ()) or ():
+            if isinstance(arg, BaseException):
+                queue.append(arg)
+    return chain
+
+
+def _is_password_error(exc: BaseException) -> bool:
+    """FF-M-pdf/audit: 判断异常链里是否有「PDF 需要密码/已加密」信号。
+
+    覆盖 pdfminer / pypdf / PyPDF2 系的类名，另加文本线索兜底。
+    """
+    for cur in _iter_exc_chain(exc):
+        if any(cls.__name__ in _PASSWORD_ERROR_NAMES for cls in type(cur).__mro__):
+            return True
+        if any(hint in str(cur).lower() for hint in _PASSWORD_ERROR_HINTS):
+            return True
+    return False
+
+
+def _password_error_detail(exc: BaseException) -> str:
+    """给「需要密码」错误取一段可读细节（包装层 ``str()`` 常为空）。"""
+    chain = _iter_exc_chain(exc)
+    for idx, cur in enumerate(chain):
+        text = str(cur).strip()
+        if text:
+            return text if idx == 0 else f"{type(cur).__name__}: {text}"
+    return type(chain[-1]).__name__ if len(chain) > 1 else type(exc).__name__
 
 
 class PDFParser(BaseParser):
@@ -128,6 +187,14 @@ class PDFParser(BaseParser):
 
         try:
             with pdfplumber.open(str(file_path)) as pdf:
+                # FF-M-pdf/audit: 有些加密 PDF 能打开但不可提取（owner 口令 +
+                # 限制位）——同样必须显式报「需要密码」，不能静默产出空内容。
+                doc = getattr(pdf, "doc", None)
+                if doc is not None and getattr(doc, "is_extractable", True) is False:
+                    raise ValueError(
+                        f"PDF 已加密（{PDF_PASSWORD_MARKER}）：{file_path.name} 不允许内容提取，"
+                        f"当前不支持密码输入；请提供已解密副本。"
+                    )
                 total_pages = len(pdf.pages)
                 logger.info("PDF 共 %d 页", total_pages)
 
@@ -171,6 +238,17 @@ class PDFParser(BaseParser):
 
                 yield from out_pages
         except Exception as e:
+            # FF-M-pdf/audit: 加密 PDF 此前只有笼统的 ValueError（且措辞不含任何
+            # 稳定标记 → 被 ParseStep 吞掉 → raw 透传假成功）。这里给出明确
+            # 「需要密码」的错误与稳定标记，让入口能报 parse_failed。
+            if isinstance(e, ValueError) and PDF_PASSWORD_MARKER in str(e):
+                raise  # 上面 is_extractable 分支已构造好的加密错误，勿重复包装
+            if _is_password_error(e):
+                logger.error("PDF 已加密（需密码）: %s", file_path)
+                raise ValueError(
+                    f"PDF 已加密（{PDF_PASSWORD_MARKER}）：{file_path.name} 需要密码才能解析"
+                    f"（{_password_error_detail(e)}）。当前不支持密码输入，请先解密或提供无密码副本。"
+                ) from e
             logger.error("PDF 解析失败: %s", e)
             raise ValueError(f"PDF 解析失败: {e}") from e
 
@@ -505,23 +583,28 @@ class PDFParser(BaseParser):
         return SequenceMatcher(None, a, b).ratio()
 
     def _ocr_page(self, page, page_number: int, ocr_backend: str | None = None):
-        """对单页进行 OCR 识别"""
+        """对单页进行 OCR 识别
+
+        FF-M-pdf/audit: 临时 PNG 用 ``delete=False`` 落盘，此前只在成功路径
+        unlink → 任何 OCR 异常都留下泄漏文件。现在统一在 finally 清理。
+        """
+        temp_path: Path | None = None
         try:
             page_image = page.to_image(resolution=200)
 
             with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
                 temp_path = Path(tmp.name)
-            page_image.save(str(temp_path), format="PNG")
-
-            result = self.ocr_engine.extract_text_from_image(temp_path, backend=ocr_backend, apply_postprocess=True)
-
-            if temp_path.exists():
-                temp_path.unlink()
-
-            return result
+            try:
+                page_image.save(str(temp_path), format="PNG")
+                return self.ocr_engine.extract_text_from_image(temp_path, backend=ocr_backend, apply_postprocess=True)
+            finally:
+                temp_path.unlink(missing_ok=True)
         except Exception as e:
             logger.error("OCR 第 %d 页失败: %s", page_number, e)
-            from ocr_engine import OcrResult
+            # FF-M-pdf/audit 顺带修正：模块路径应为 core.ocr_engine——原
+            # `from ocr_engine import ...` 在本仓库不存在，OCR 失败路径会
+            # 直接 ModuleNotFoundError（失败兜底形同虚设）。
+            from core.ocr_engine import OcrResult
 
             return OcrResult(page_number=page_number, text="", confidence=0.0, method="none")
 
