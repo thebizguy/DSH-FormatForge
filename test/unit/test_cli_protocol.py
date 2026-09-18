@@ -54,8 +54,9 @@ class TestArgparseJsonOutput:
         import json
         payload = json.loads(captured.out.strip())
         assert payload["ok"] is False
-        assert payload["error"]["kind"] == "internal"
-        assert rc != 0
+        # FF-M-kinds/audit: 用法错误是 bad_request(exit 7)，不是 internal(70)
+        assert payload["error"]["kind"] == "bad_request"
+        assert rc == 7
 
     def test_invalid_choice_returns_json(self, capsys):
         """v1.0.1: 命令参数无效选择 → JSON 错误输出。"""

@@ -104,7 +104,10 @@
   再退到历史别名表；argparse 的用法错误改报 `bad_request`(exit 7)；
   `SystemExit("字符串")` 不再因 `int()` 抛 `ValueError` 变成无协议 JSON 的
   traceback（补一条 `bad_request` JSON）；入口 docstring 的退出码表与
-  `core/errors.py` 对齐（`formatforge/__main__.py`）。
+  `core/errors.py` 对齐（`formatforge/__main__.py`）。既有测试
+  `test_cli_protocol.py::TestArgparseJsonOutput::test_unknown_subcommand_returns_json`
+  曾断言 `kind == "internal"`——即把审计认定的缺陷固化成期望，已更新为
+  `bad_request` + `rc == 7`。
 - **FF-M-logging stdout 污染**：`setup_logging` 的 `StreamHandler` 曾绑
   `sys.stdout`（当前零调用方，但一旦被调用就会破坏「stdout 只有一条协议 JSON」
   契约），改为 `sys.stderr`（`core/logging_config.py`）。
