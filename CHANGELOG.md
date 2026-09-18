@@ -73,6 +73,19 @@
   ④ `--format json` 先 `json.loads` 再 `json.dumps(indent=2)` → 行数描述的是
   「美化后的形态」而非源内容，现直接按 translate 产出的内容切行
   （`formatforge/diff.py`）。
+- **FF-M-protocol `--help` 污染 stdout**：argparse 的 `--help` 把 usage
+  `print` 到 stdout 后 `SystemExit(0)` → JS 侧 python-runner 首行 JSON parse
+  直接失败。现把 stdout 临时接管：usage 走 stderr（人类通道），stdout 只发一条
+  `{"ok":true,"code":200,"data":{"help":...}}`（`formatforge/__main__.py`）。
+- **FF-M-protocol `--output-file` 无沙箱 + 失败被吞**：旧实现
+  `mkdir(parents=True)` 后写任意路径（H11 同类的无沙箱写原语），且写入失败只
+  `logger.warning` 仍返回 `ok:true`。现写入目标收敛到用户声明的根
+  （`FF_OUTPUT_ROOT`（多个用 `os.pathsep` 分隔）→ 未声明时 CWD，另加源文件
+  所在目录），越界报 `bad_request`（exit 7）且不产生目录副作用，写入失败报
+  `permission_denied`（exit 2）；新增 `formatforge/output_guard.py`。
+  > ⚠️ 行为变更：不再默认允许任意路径写盘；需要写到声明根之外时请设置
+  > `FF_OUTPUT_ROOT`。`batch --out` 的同类无沙箱写仍 open（刻意不在本批次扩大
+  > 改动面，见 secondary 汇总文档的 deferral 列表）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 

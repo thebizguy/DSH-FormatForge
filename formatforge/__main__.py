@@ -10,6 +10,7 @@ FormatForge CLI 入口
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import sys
@@ -239,10 +240,17 @@ def cmd_translate(args: argparse.Namespace) -> int:
                 else:
                     data["enhance"] = {"needed": False, "hint": new_hint}  # type: ignore[assignment]
     # A9/v0.10.0: --output-file 把 content 落盘（stdout 协议 JSON 不变）
+    # FF-M-protocol/audit: 写入失败不再「logger.warning + ok:true」；目标路径
+    # 收敛到用户声明的根（FF_OUTPUT_ROOT / CWD / 源文件目录），越界报 bad_request。
     output_file = getattr(args, "output_file", None)
     if output_file:
+        from formatforge.output_guard import OutputPathError, resolve_output_path
+
         try:
-            out_path = Path(output_file)
+            out_path = resolve_output_path(output_file, source=source if isinstance(source, Path) else None)
+        except OutputPathError as e:
+            return _fail("bad_request", str(e), code=ErrorCode.BAD_REQUEST)
+        try:
             out_path.parent.mkdir(parents=True, exist_ok=True)
             content_val = data.get("content")
             content_str = (
@@ -250,8 +258,12 @@ def cmd_translate(args: argparse.Namespace) -> int:
             )
             out_path.write_text(content_str, encoding="utf-8")
             meta["output_file"] = str(out_path)
-        except Exception as e:
-            logger.warning("[A9] --output-file 写入失败: %s", e)
+        except OSError as e:
+            return _fail(
+                "permission_denied",
+                f"--output-file 写入失败: {out_path}: {e}",
+                code=ErrorCode.PERMISSION_DENIED,
+            )
     _emit({"ok": True, "code": 200, "data": data})
     return EXIT_OK
 
@@ -512,15 +524,30 @@ def main(argv: list[str] | None = None) -> int:
             return False
 
     _saved_stderr = sys.stderr
+    # FF-M-protocol/audit: argparse 的 --help 会 print_help 到 **stdout** 并
+    # SystemExit(0) —— usage 直接污染「stdout 唯一 JSON 出口」。这里把 stdout
+    # 临时接到缓冲区：捕获到的 usage 走 stderr（人类通道），stdout 只发一条协议
+    # JSON（data.help 带全文）。
+    _saved_stdout = sys.stdout
+    _captured = io.StringIO()
+    sys.stdout = _captured
     sys.stderr = _SilentStream()
     try:
         args = parser.parse_args(argv)
     except SystemExit as e:
+        # 先还原真实 stdout（_emit/_fail 必须写到真实 stdout），再决定出口
+        sys.stdout = _saved_stdout
         sys.stderr = _saved_stderr
+        usage_text = _captured.getvalue()
+        if usage_text.strip():
+            print(usage_text, file=_saved_stderr, end="")
+            _emit({"ok": True, "code": 200, "data": {"help": usage_text}})
+            return EXIT_OK
         if isinstance(e.code, int) and e.code != 0:
             return _fail("internal", f"参数错误（exit {e.code}）。试 --help 看用法。")
         raise
     finally:
+        sys.stdout = _saved_stdout
         sys.stderr = _saved_stderr
     result_code: int = exit_code_of(ErrorCode.BAD_REQUEST)
     try:
