@@ -61,6 +61,18 @@
   边界，下游 Markdown 渲染器会把单元格内容当成表格结构（内容欺骗）。新增
   `core.table_semantics.escape_md_cell`（换行→`<br>`，未转义的 `|`→`\|`），
   并接入 `render_markdown_table` 与 docx/xlsx/pptx/odf/pdf 的单元格拼接路径。
+- **FF-M-diff 四处口径失真**：① `--context` 的 clamp 写成
+  `max(i1, i1 - context)`（恒等于 `i1`）→ 任何取值都吐出全部未变更内容；
+  且 `int(args.context or 3)` 会把合法的 `--context 0` 静默换成 3。现只保留变更
+  前后各 `context` 行，中段以 `... 省略 N 行未变更内容 ...` 标记并在
+  `elided_count` 报数；② `--since-mtime` 只过滤 `path_b`（注释却声称两侧都过滤），
+  且 `nan`/`inf` 会「解析成功」但比较恒 False → 过滤器被静默禁用；现两侧都过滤
+  （`skipped_side` 指明哪侧过旧），非有限数字报 `bad_request`；
+  ③ `--against-dir` 同 stem 多候选时取 glob 顺序的 `candidates[0]`（旧版本随
+  文件系统顺序漂移）→ 改为按 mtime 新→旧、同 mtime 按路径名确定性择新；
+  ④ `--format json` 先 `json.loads` 再 `json.dumps(indent=2)` → 行数描述的是
+  「美化后的形态」而非源内容，现直接按 translate 产出的内容切行
+  （`formatforge/diff.py`）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 

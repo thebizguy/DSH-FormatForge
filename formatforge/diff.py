@@ -19,6 +19,7 @@ import argparse
 import difflib
 import json
 import logging
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -31,7 +32,7 @@ def _read_text_lines(path: Path, fmt: str) -> list[str]:
 
     为避免重复计算，translate 子命令被内联调用：
     - text / markdown → translate 的 rawText
-    - json → translate 的 structured_data 序列化
+    - json → translate 的 structured_data 序列化（原样切行，不重新美化）
     """
     from formatforge.__main__ import translate_file_data  # noqa: PLC0415
 
@@ -39,17 +40,25 @@ def _read_text_lines(path: Path, fmt: str) -> list[str]:
     if exit_code != 0 or not isinstance(data, dict) or "content" not in data:
         raise ValueError(f"转换失败: {data if isinstance(data, dict) else 'no data'}")
     content = str(data["content"])
-    # markdown/text 直接按行；json 用紧凑 JSON 序列化按 \n 拆
-    if fmt in ("text", "markdown"):
-        return content.splitlines()
-    elif fmt == "json":
-        try:
-            obj = json.loads(content)
-            return json.dumps(obj, ensure_ascii=False, indent=2).splitlines()
-        except json.JSONDecodeError:
-            return content.splitlines()
-    else:
-        return content.splitlines()
+    # FF-M-diff/audit: 不再对 json 重新 indent=2 序列化——那会让 lines_a/lines_b
+    # 描述「美化后的形态」而不是源内容本身（行数/行号全是假的）。
+    # 所有 format 一律按 translate 产出的内容直接切行。
+    return content.splitlines()
+
+
+def _int_opt(value: Any, default: int, floor: int) -> int:
+    """FF-M-diff/audit: 数值选项归一化。
+
+    旧写法 `int(args.context or 3)` 会把合法的 ``--context 0``（只看变更行）
+    静默换成默认值 3 —— 显式传入的 0 与「未传」必须区分开。
+    """
+    if value is None:
+        return max(floor, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return max(floor, default)
+    return max(floor, parsed)
 
 
 def _resolve_paths(args: argparse.Namespace) -> tuple[str | None, str | None]:
@@ -112,15 +121,19 @@ def cmd_diff(args: argparse.Namespace) -> int:
     # v0.14.0/B-P0-2: --since-mtime 类型校验最先（其他错误前先报）
     if getattr(args, "since_mtime", None) is not None:
         try:
-            float(args.since_mtime)
+            since_value = float(args.since_mtime)
         except (TypeError, ValueError):
+            since_value = None
+        if since_value is None or not math.isfinite(since_value):
+            # FF-M-diff/audit: float("nan") 会「解析成功」但所有比较恒为 False
+            # → 过滤器被静默禁用；NaN/inf 一律按参数错误处理。
             return _emit_diff(
                 ok=False,
                 code=4000 + exit_code_of(ErrorCode.BAD_REQUEST),
                 data={},
                 error={
                     "kind": ErrorCode.BAD_REQUEST.value,
-                    "message": f"--since-mtime 必须是数字（Unix timestamp）: {args.since_mtime}",
+                    "message": f"--since-mtime 必须是有限数字（Unix timestamp）: {args.since_mtime}",
                 },
             )
 
@@ -164,8 +177,8 @@ def cmd_diff(args: argparse.Namespace) -> int:
         path_a,
         path_b,
         fmt,
-        context=max(0, int(args.context or 3)),
-        max_chars=max(500, int(args.max_chars or 12000)),
+        context=_int_opt(getattr(args, "context", None), 3, 0),
+        max_chars=_int_opt(getattr(args, "max_chars", None), 12000, 500),
     )
     return _emit_diff(ok=True, code=200, data=diff_payload)
 
@@ -175,8 +188,8 @@ def _cmd_diff_against_dir(args: argparse.Namespace, fmt: str) -> int:
 
     行为：
       - path_b 必填
-      - path_a 可选（自动取 dir 内与 path_b 同 stem 的文件）
-      - --since-mtime 过滤：跳过 mtime < ts 的 path_b 文件
+      - path_a 可选（自动取 dir 内与 path_b 同 stem 的文件；多个候选按 mtime 确定性择新）
+      - --since-mtime 过滤：path_a / path_b 任一侧 mtime < ts 即跳过（skipped=True）
       - 输出包含 'diffs' 列表，每项是单文件 diff payload
     """
     from core.errors import ErrorCode, exit_code_of  # noqa: PLC0415
@@ -211,11 +224,24 @@ def _cmd_diff_against_dir(args: argparse.Namespace, fmt: str) -> int:
         path_a = Path(args.path_a)
     else:
         # v0.14.0/audit: 排除 path_b 自身（之前 glob(stem) 会匹配 new.txt 自身 → self-diff）
-        candidates = [
-            p
-            for p in (list(against_dir.glob(f"{stem}.*")) + list(against_dir.glob(stem)))
-            if p != path_b and p.exists()
-        ]
+        # FF-M-diff/audit: 多个同 stem 候选时不再取 glob 顺序的 candidates[0]
+        # （顺序不确定 → 「旧版本」在两次运行间可能不同）；按 mtime 新→旧、
+        # 同 mtime 按路径名排序，取确定性最优者。
+        try:
+            self_key = path_b.resolve()
+        except OSError:  # pragma: no cover - 防御
+            self_key = path_b
+        candidates = []
+        for p in list(against_dir.glob(f"{stem}.*")) + list(against_dir.glob(stem)):
+            if not p.exists():
+                continue
+            try:
+                if p.resolve() == self_key:
+                    continue
+            except OSError:  # pragma: no cover - 防御
+                if p == path_b:
+                    continue
+            candidates.append(p)
         if not candidates:
             return _emit_diff(
                 ok=False,
@@ -226,7 +252,8 @@ def _cmd_diff_against_dir(args: argparse.Namespace, fmt: str) -> int:
                     "message": f"--against-dir {against_dir} 内找不到 stem={stem} 的文件",
                 },
             )
-        path_a = candidates[0]
+        # FF-M-diff/audit: 确定性选择「旧版本」——mtime 新→旧，同 mtime 按路径名
+        path_a = sorted(candidates, key=lambda p: (-p.stat().st_mtime, str(p)))[0]
 
     if not path_a.exists():
         return _emit_diff(
@@ -244,28 +271,35 @@ def _cmd_diff_against_dir(args: argparse.Namespace, fmt: str) -> int:
         try:
             since_mtime_f = float(since_mtime)
         except (TypeError, ValueError):
+            since_mtime_f = None
+        if since_mtime_f is None or not math.isfinite(since_mtime_f):
+            # FF-M-diff/audit: NaN/inf 会让所有比较恒为 False → 过滤器被静默禁用
             return _emit_diff(
                 ok=False,
                 code=4000 + exit_code_of(ErrorCode.BAD_REQUEST),
                 data={},
                 error={
                     "kind": ErrorCode.BAD_REQUEST.value,
-                    "message": f"--since-mtime 必须是数字（Unix timestamp）: {since_mtime}",
+                    "message": f"--since-mtime 必须是有限数字（Unix timestamp）: {since_mtime}",
                 },
             )
-        # 过滤 path_b（也过滤 path_a 二者皆需新于 ts）
-        if path_b.stat().st_mtime < since_mtime_f:
-            return _emit_diff(
-                ok=True,
-                code=200,
-                data={
-                    "mode": "against_dir",
-                    "skipped": True,
-                    "reason": f"path_b mtime {path_b.stat().st_mtime:.0f} < --since-mtime {since_mtime_f:.0f}",
-                    "path_b": str(path_b),
-                    "path_a": str(path_a),
-                },
-            )
+        # FF-M-diff/audit: 两侧都过滤（注释此前声称二者皆需新于 ts，代码却只看
+        # path_b）——哪一侧过旧就报哪一侧，不再静默产出 diff。
+        for side, p in (("path_b", path_b), ("path_a", path_a)):
+            side_mtime = p.stat().st_mtime
+            if side_mtime < since_mtime_f:
+                return _emit_diff(
+                    ok=True,
+                    code=200,
+                    data={
+                        "mode": "against_dir",
+                        "skipped": True,
+                        "reason": f"{side} mtime {side_mtime:.0f} < --since-mtime {since_mtime_f:.0f}",
+                        "skipped_side": side,
+                        "path_b": str(path_b),
+                        "path_a": str(path_a),
+                    },
+                )
 
     try:
         lines_a = _read_text_lines(path_a, fmt)
@@ -287,8 +321,8 @@ def _cmd_diff_against_dir(args: argparse.Namespace, fmt: str) -> int:
         path_a,
         path_b,
         fmt,
-        context=max(0, int(args.context or 3)),
-        max_chars=max(500, int(args.max_chars or 12000)),
+        context=_int_opt(getattr(args, "context", None), 3, 0),
+        max_chars=_int_opt(getattr(args, "max_chars", None), 12000, 500),
     )
     diff_payload["mode"] = "against_dir"
     diff_payload["against_dir"] = str(against_dir)
@@ -312,14 +346,27 @@ def _compute_diff(
     additions = 0
     deletions = 0
     unchanged = 0
+    elided = 0
     diff_chunks: list[str] = []
     for tag, i1, i2, j1, j2 in opcodes:
         if tag == "equal":
             unchanged += i2 - i1
-            ctx_start = max(i1, i1 - context) if i1 > 0 else i1
-            ctx_end_a = min(i2, i2 + context) if i2 < len(lines_a) else i2
-            for ln in lines_a[ctx_start:ctx_end_a]:
-                diff_chunks.append(" " + ln)
+            # FF-M-diff/audit: 旧实现 `max(i1, i1 - context)` 恒等于 i1、`i2 + context`
+            # 恒等于 i2 —— --context 完全无效，全部未变更内容都被吐出来。现在只保留
+            # 变更前后各 context 行；中段省略并以显式标记 + elided_lines 报数。
+            block = i2 - i1
+            if block <= 2 * context:
+                for ln in lines_a[i1:i2]:
+                    diff_chunks.append(" " + ln)
+            else:
+                for ln in lines_a[i1 : i1 + context]:
+                    diff_chunks.append(" " + ln)
+                skipped = block - 2 * context
+                elided += skipped
+                diff_chunks.append(f"... 省略 {skipped} 行未变更内容 ...")
+                if context:
+                    for ln in lines_a[i2 - context : i2]:
+                        diff_chunks.append(" " + ln)
         elif tag == "delete":
             deletions += i2 - i1
             for ln in lines_a[i1:i2]:
@@ -350,6 +397,7 @@ def _compute_diff(
         "additions": additions,
         "deletions": deletions,
         "unchanged_count": unchanged,
+        "elided_count": elided,
         "similarity": similarity,
         "diff_preview": diff_preview,
         "truncated": truncated,
@@ -392,6 +440,6 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--since-mtime",
         dest="since_mtime",
         default=None,
-        help="仅处理 mtime >= 此 Unix timestamp 的 path_b",
+        help="增量模式：path_a/path_b 任一侧 mtime < 此 Unix timestamp 即跳过（NaN/inf 报参数错误）",
     )
     p_d.set_defaults(func=cmd_diff)
