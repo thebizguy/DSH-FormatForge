@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 
 from core.models import ExtractedElement, PageContent
+from core.table_semantics import escape_md_cell
 from parsers import BaseParser
 
 logger = logging.getLogger("parsers.docx")
@@ -238,9 +239,13 @@ class DOCXParser(BaseParser):
         return "text"
 
     def _extract_table_text(self, table: "Table") -> str:
-        """提取表格文本内容"""
+        """提取表格文本内容
+
+        FF-M-table/audit: 单元格里的 ``|``/换行会撕开伪 Markdown 表格的行列边界，
+        统一经 ``escape_md_cell``（``|``→``\\|``，换行→``<br>``）。
+        """
         rows = []
         for row in table.rows:
-            cells = [cell.text.strip() for cell in row.cells]
+            cells = [escape_md_cell(cell.text.strip()) for cell in row.cells]
             rows.append(" | ".join(cells))
         return "\n".join(rows)

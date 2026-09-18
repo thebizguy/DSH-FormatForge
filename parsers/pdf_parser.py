@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models import ExtractedElement, PageContent
+from core.table_semantics import escape_md_cell
 from parsers import BaseParser
 
 logger = logging.getLogger("parsers.pdf")
@@ -567,13 +568,16 @@ class PDFParser(BaseParser):
         return "text"
 
     def _format_table(self, table: list[list[str | None]]) -> str:
-        """格式化表格为文本"""
+        """格式化表格为文本
+
+        FF-M-table/audit: 单元格内的 | / 换行会撕开伪 Markdown 表格几何。
+        """
         if not table:
             return ""
 
         lines = []
         for row in table:
-            cells = [str(cell) if cell is not None else "" for cell in row]
+            cells = [escape_md_cell(cell) if cell is not None else "" for cell in row]
             lines.append(" | ".join(cells))
 
         return "\n".join(lines)

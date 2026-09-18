@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from core.models import ExtractedElement, PageContent
+from core.table_semantics import escape_md_cell
 from parsers import BaseParser
 
 logger = logging.getLogger("parsers.xlsx")
@@ -126,11 +127,12 @@ class XLSXParser(BaseParser):
                 continue
 
             # 格式化表格文本 —— Markdown 表格（含表头分隔行）
+            # FF-M-table/audit: 单元格内的 | / 换行会撕开 Markdown 表格几何
             table_lines = []
             for _row_idx, row_data in enumerate(sheet_data):
                 while len(row_data) < max_col:
                     row_data.append("")
-                table_lines.append("| " + " | ".join(row_data) + " |")
+                table_lines.append("| " + " | ".join(escape_md_cell(c) for c in row_data) + " |")
             if len(table_lines) > 1:
                 table_lines.insert(1, "|" + "---|" * max_col)
 
@@ -211,7 +213,8 @@ class XLSXParser(BaseParser):
 
             table_lines = []
             for row_data in sheet_data:
-                line = " | ".join(row_data)
+                # FF-M-table/audit: 同上——单元格内的 | / 换行会撕开表格几何
+                line = " | ".join(escape_md_cell(c) for c in row_data)
                 table_lines.append(line)
 
             table_text = "\n".join(table_lines)

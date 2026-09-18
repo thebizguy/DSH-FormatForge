@@ -10,6 +10,7 @@ import zipfile
 from pathlib import Path
 
 from core.models import ExtractedElement, PageContent
+from core.table_semantics import escape_md_cell
 from parsers import BaseParser
 
 logger = logging.getLogger("parsers.odf")
@@ -243,15 +244,17 @@ class ODFParser(BaseParser):
                         cells.append(cell_text)
 
                 if any(c for c in cells):
+                    # FF-M-table/audit: 单元格内的 | / 换行会撕开伪 Markdown 表格几何
+                    rendered = [escape_md_cell(c) for c in cells]
                     elements.append(
                         ExtractedElement(
                             elementId=f"elem_{page_num}_{elem_idx[0]}",
                             elementType="table_row",
-                            content=" | ".join(cells),
+                            content=" | ".join(rendered),
                             metadata={"cells": cells, "col_count": len(cells), "sheet": sheet_name},
                         )
                     )
-                    raw_lines.append(" | ".join(cells))
+                    raw_lines.append(" | ".join(rendered))
                     elem_idx[0] += 1
 
             pages.append(
@@ -402,8 +405,12 @@ class ODFParser(BaseParser):
                 rows.append(cells)
 
         if rows or header:
+            # FF-M-table/audit: 单元格内的 | / 换行会撕开伪 Markdown 表格几何
+            safe_header = [escape_md_cell(c) for c in header]
             table_text = (
-                " | ".join(header) + "\n" + "\n".join(" | ".join(r) for r in rows) if rows else " | ".join(header)
+                " | ".join(safe_header) + "\n" + "\n".join(" | ".join(escape_md_cell(c) for c in r) for r in rows)
+                if rows
+                else " | ".join(safe_header)
             )
             elements.append(
                 ExtractedElement(

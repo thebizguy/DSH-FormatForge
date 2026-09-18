@@ -65,6 +65,19 @@ def normalize_grid(grid: list[list[Any]]) -> tuple[list[list[str]], int]:
     return out, merged
 
 
+def escape_md_cell(value: Any) -> str:
+    """单元格值 → 单行 Markdown 单元格文本。
+
+    FF-M-table/audit: 单元格里的 ``|`` 会撕开列边界、换行会撕开行边界——下游
+    Markdown 渲染器会把单元格内容当成表格结构（内容欺骗）。统一处理：
+    换行（``\\r\\n``/``\\r``/``\\n``）→ ``<br>``，未转义的 ``|`` → ``\\|``。
+    """
+    text = "" if value is None else str(value)
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace("\n", "<br>")
+    return re.sub(r"(?<!\\)\|", r"\\|", text)
+
+
 def render_markdown_table(grid: list[list[str]], title: str | None = None) -> str:
     """网格 → 标准 Markdown 表格：数值列右对齐（---:），其余默认对齐。"""
     if not grid:
@@ -79,7 +92,7 @@ def render_markdown_table(grid: list[list[str]], title: str | None = None) -> st
         aligns.append("---:" if is_numeric_column(values) else "---")
 
     def fmt(row: list[str]) -> str:
-        return "| " + " | ".join(c.replace("|", "\\|") for c in row) + " |"
+        return "| " + " | ".join(escape_md_cell(c) for c in row) + " |"
 
     lines = []
     if title:

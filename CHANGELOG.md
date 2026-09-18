@@ -57,6 +57,10 @@
   `w:sdtContent`，按 `w:t` 收集段落文本（插入文本**合并**展示并在
   `metadata.tracked_insert` 标记；`w:delText` 天然排除），逐元素隔离并把跳过的
   元素记进 `metadata.skipped_elements`（`parsers/docx_parser.py`）。
+- **FF-M-table 单元格撕开表格几何**：单元格里的 `|` 会伪造列边界、换行会伪造行
+  边界，下游 Markdown 渲染器会把单元格内容当成表格结构（内容欺骗）。新增
+  `core.table_semantics.escape_md_cell`（换行→`<br>`，未转义的 `|`→`\|`），
+  并接入 `render_markdown_table` 与 docx/xlsx/pptx/odf/pdf 的单元格拼接路径。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
