@@ -22,7 +22,15 @@
   `meta.result_id`（精确 + ≥8 位前缀）。顺带修 `Math.max(200, max_chars)` 静默覆盖
   （<200 的显式 `max_chars` 被抬到 200）与非整数参数不取整。回归测试
   `test/test-result-protocol.mjs`：合成真实协议形状的 `.ff.json` 产物，断言取回非空
-  content 与正确 parser/confidence（23 项断言，失败非零退出）。
+  content 与正确 parser/confidence（30 项断言，失败非零退出）。
+- **JS-H1b 产物信任边界（H1 的必然推论）**：修好键漂移后 `ff_result` 开始真的吐正文，
+  但 `.json` 是上传白名单扩展名 —— 伪造的 `anything.ff.json` 会被当作真实转换结果端给
+  模型。现取回前先校验 round-1 成功信封（`ok:true` + string `content` +
+  `meta.result_id`），不满足者以 `not_a_conversion_result` 拒绝，**绝不把原始文件字节
+  当结果返回**；list 模式给这类文件打 `valid:false` 并在渲染里标「⚠非转换产物」。
+  同时修 list 的 2KB 头部解析：协议里 `meta` 排在 `content` **之后**，>2KB 的真实产物
+  原本一律显示 `parser=?`/`confidence=null`；现在小产物整段解析、大产物只读首 64B + 尾
+  4KB（不把整份正文读进内存），result_id 查找也走同一读取器（大产物按 id 取回原先必失败）。
 
 ### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
 

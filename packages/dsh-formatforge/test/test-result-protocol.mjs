@@ -136,6 +136,46 @@ check('unknown id → file_not_found', missing.ok === false && missing.error?.ki
 const traversal = await tool.execute({ id: '../secret' })
 check('path traversal rejected', traversal.ok === false && traversal.error?.kind === 'bad_request', JSON.stringify(traversal))
 
+// 10) JS-H1b 信任边界：伪造/残缺的 .ff.json 绝不能被当作转换结果端出去
+writeFileSync(join(inbox, 'forged.ff.json'), JSON.stringify({ hello: 'world', content: 'attacker payload' }))
+const forged = await tool.execute({ id: 'forged' })
+check('fabricated artifact → not_a_conversion_result', forged.ok === false && forged.error?.kind === 'not_a_conversion_result', JSON.stringify(forged))
+writeFileSync(
+  join(inbox, 'noid.ff.json'),
+  JSON.stringify({ ok: true, code: 200, data: { content: 'x', format: 'markdown', meta: { parser: 'pdf' } } }),
+)
+const noId = await tool.execute({ id: 'noid' })
+check('envelope without meta.result_id → rejected', noId.ok === false && noId.error?.kind === 'not_a_conversion_result', JSON.stringify(noId))
+const listedFlagged = await tool.execute({ list: true })
+check(
+  'list flags non-conversion artifacts (valid:false)',
+  listedFlagged.data.items.filter((it) => it.valid === false).length === 2,
+  JSON.stringify(listedFlagged.data.items.map((it) => [it.file, it.valid])),
+)
+const flaggedRender = tool.output.render({}, listedFlagged)
+check('list render warns on invalid rows', flaggedRender[0].text.includes('非转换产物'), flaggedRender[0].text.slice(0, 200))
+
+// 11) 大产物（> 64KB）：list 不得整段读正文，但仍要从尾部 meta 取到 parser/confidence
+const bigContent = 'x'.repeat(80 * 1024)
+writeFileSync(
+  join(inbox, 'big.docx.ff.json'),
+  JSON.stringify(
+    { ok: true, code: 200, data: { content: bigContent, format: 'markdown', meta: { parser: 'docx', file_size: 99999, result_id: 'cvt_big00001', confidence: 0.88 } } },
+    null,
+    2,
+  ),
+)
+const bigRow = (await tool.execute({ list: true })).data.items.find((it) => it.file === 'big.docx.ff.json')
+check(
+  'large artifact: list meta read from tail',
+  bigRow?.parser === 'docx' && bigRow?.confidence === 0.88 && bigRow?.id === 'cvt_big00001' && bigRow?.valid === true,
+  JSON.stringify(bigRow),
+)
+const bigFetch = await tool.execute({ id: 'cvt_big00001', max_chars: 200_000 })
+check('large artifact fetch returns full content', bigFetch.ok === true && bigFetch.data?.content?.length === bigContent.length, JSON.stringify({ ok: bigFetch.ok, len: bigFetch.data?.content?.length }))
+const bigPaged = await tool.execute({ id: 'cvt_big00001' })
+check('large artifact default paging (12k page)', bigPaged.data?.content?.length === 12_000 && bigPaged.data?.next_offset === 12_000, JSON.stringify({ len: bigPaged.data?.content?.length, next: bigPaged.data?.next_offset }))
+
 if (failures > 0) {
   console.error(`\n❌ ${failures} check(s) failed`)
   process.exit(1)

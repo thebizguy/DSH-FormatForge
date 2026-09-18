@@ -10,13 +10,64 @@
 
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { join, basename } from 'node:path'
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync, openSync, readSync, closeSync } from 'node:fs'
 import { inboxDir } from '../services/inbox-watcher.mjs'
 import { smartTruncate } from './_truncate.mjs'
 
 const DEFAULT_MAX_CHARS = 12_000
+/** 小产物整段解析的上限；更大的产物只读首尾（协议里 meta 排在 content 之后） */
+const SMALL_ARTIFACT_BYTES = 64 * 1024
 
 /** v0.13.0: 截断逻辑已抽到 _truncate.mjs 共用；smartTruncate 由该模块导入（与 core/utils.py::smart_truncate 镜像） */
+
+/**
+ * 读产物的协议元数据（JS-H1b：顺带给出「是不是合法转换结果」的判定）。
+ * 返回 {valid, meta, enhance}；不可读/不可解析返回 null。
+ */
+function readArtifactMeta(full, size) {
+  if (size <= SMALL_ARTIFACT_BYTES) {
+    let doc
+    try {
+      doc = JSON.parse(readFileSync(full, { encoding: 'utf8' }))
+    } catch {
+      return null
+    }
+    const data = doc?.data || {}
+    const meta = data.meta || {}
+    return { valid: doc?.ok === true && typeof data.content === 'string' && !!meta.result_id, meta, enhance: data.enhance || null }
+  }
+  // 大产物：不把整份正文读进内存——首 64B 判 ok，尾 4KB 取 meta 字段
+  let head = ''
+  let tail = ''
+  try {
+    const fd = openSync(full, 'r')
+    try {
+      const hb = Buffer.alloc(64)
+      head = hb.subarray(0, readSync(fd, hb, 0, 64, 0)).toString('utf8')
+      const tb = Buffer.alloc(4096)
+      tail = tb.subarray(0, readSync(fd, tb, 0, 4096, Math.max(0, size - 4096))).toString('utf8')
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    return null
+  }
+  const str = (key) => {
+    const m = tail.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`))
+    return m ? m[1] : null
+  }
+  const num = (key) => {
+    const m = tail.match(new RegExp(`"${key}"\\s*:\\s*(-?[0-9.]+)`))
+    return m ? Number(m[1]) : null
+  }
+  const resultId = str('result_id')
+  return {
+    valid: /"ok"\s*:\s*true/.test(head) && !!resultId,
+    // 协议里 meta 在 content 之后、quality/enhance 之前 → 尾部的首个匹配即 meta 字段
+    meta: { result_id: resultId, parser: str('parser'), confidence: num('confidence'), file_size: num('file_size') },
+    enhance: null,
+  }
+}
 
 function listArtifacts() {
   const dir = inboxDir()
@@ -32,23 +83,21 @@ function listArtifacts() {
     const full = join(dir, name)
     try {
       const st = statSync(full)
-      const head = readFileSync(full, { encoding: 'utf8' }).slice(0, 2048)
-      let env = {}
-      try {
-        const j = JSON.parse(head.endsWith('}') ? head : head.slice(0, head.lastIndexOf('}') + 1))
-        env = j.data || j
-      } catch { /* truncated head — leave empty */ }
       // round-1 H1 协议：成功信封 {ok, code, data:{content, format, meta:{parser, file_size, result_id, confidence}}}
       // 源文件名不入协议——由产物文件名承载（`foo.pdf.ff.json` → 源 `foo.pdf`）
-      const meta = env.meta || {}
+      const info = readArtifactMeta(full, st.size)
+      if (!info) continue
+      const meta = info.meta || {}
+      const stem = name.replace(/\.ff\.json$/, '')
       rows.push({
-        id: meta.result_id || name.replace(/\.ff\.json$/, ''),
+        id: meta.result_id || stem,
         file: name,
-        source: name.replace(/\.ff\.json$/, ''),
+        source: stem,
         parser: meta.parser || '?',
-        pages: meta.pages ?? null,
         confidence: typeof meta.confidence === 'number' ? meta.confidence : null,
-        enhance: env.enhance?.reason || null,
+        file_size: typeof meta.file_size === 'number' ? meta.file_size : null,
+        enhance: info.enhance?.reason || null,
+        valid: info.valid === true,
         forged_at: st.mtime.toISOString(),
         size_bytes: st.size,
         path: full,
@@ -106,7 +155,8 @@ export function createResultTool({ log = () => {} }) {
           const lines = d.items.map(
             (it) =>
               `- [${it.id}] ${it.source} (parser=${it.parser}, confidence=${it.confidence ?? '?'}` +
-              `${it.enhance ? `, ⚠enhance=${it.enhance}` : ''}, ${Math.round(it.size_bytes / 1024)}KB, ${it.forged_at})`,
+              `${it.enhance ? `, ⚠enhance=${it.enhance}` : ''}, ${Math.round(it.size_bytes / 1024)}KB, ${it.forged_at})` +
+              `${it.valid === false ? ' ⚠非转换产物（伪造/损坏，取回会被拒）' : ''}`,
           )
           return [{ type: 'text', text: `FormatForge 收件箱共 ${d.count} 个产物：\n${lines.join('\n')}\n\n用 ff_result(id=...) 取回内容。` }]
         }
@@ -177,15 +227,16 @@ async function fetchOne(rawId, args, log) {
       let idPrefixHit = null
       for (const n of names) {
         try {
-          const head = readFileSync(join(dir, n), { encoding: 'utf8' }).slice(0, 512)
-          // 精确匹配协议里的 result_id（"result_id": "cvt..."；兼容旧写法 resultId）
-          const m = head.match(/"(?:result_id|resultId)"\s*:\s*"([^"]*)"/)
-          if (!m) continue
-          if (m[1] === rawId) {
+          const np = join(dir, n)
+          const info = readArtifactMeta(np, statSync(np).size)
+          const rid = info?.meta?.result_id
+          if (!rid) continue
+          // 精确匹配协议里的 result_id（唯一写入方 inbox-watcher 存的是 CLI 信封逐字拷贝）
+          if (rid === rawId) {
             target = n
             break
           }
-          if (!idPrefixHit && rawId.length >= 8 && m[1].startsWith(rawId)) idPrefixHit = n
+          if (!idPrefixHit && rawId.length >= 8 && rid.startsWith(rawId)) idPrefixHit = n
         } catch { /* skip */ }
       }
       if (!target && idPrefixHit) target = idPrefixHit
@@ -210,7 +261,20 @@ async function fetchOne(rawId, args, log) {
   }
   const data = doc.data || {}
   const meta = data.meta || {}
-  const content = typeof data.content === 'string' ? data.content : ''
+  // JS-H1b 信任边界：`.json` 是上传白名单扩展名 → 任何人（或页面）都能伪造
+  // `anything.ff.json` 丢进收件箱。只认 round-1 成功信封（ok:true + string content
+  // + meta.result_id）；其余一律拒绝，绝不把原始文件字节当「转换结果」端给模型。
+  if (doc.ok !== true || typeof data.content !== 'string' || !meta.result_id) {
+    return {
+      ok: false,
+      code: 4005,
+      error: {
+        kind: 'not_a_conversion_result',
+        message: `产物 ${basename(target)} 不是合法的转换结果（需 ok:true + content + meta.result_id）——已拒绝返回。`,
+      },
+    }
+  }
+  const content = data.content
   // 参数归一：0/负数/非数回落到默认（`max_chars: 0` 在调用方=未指定），非整数向下取整
   const rawMax = Number(args.max_chars)
   const maxChars = Number.isFinite(rawMax) && rawMax > 0 ? Math.floor(rawMax) : DEFAULT_MAX_CHARS
