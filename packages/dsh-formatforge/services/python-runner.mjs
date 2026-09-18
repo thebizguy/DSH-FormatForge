@@ -18,6 +18,49 @@ const IS_WIN = platform() === 'win32'
 export const DEFAULT_TIMEOUT_MS = 120_000
 const MIN_PYTHON = [3, 10]
 
+// ─── JS-H7: 子进程环境白名单 ───
+// 此前子进程继承**整台机器**的 process.env（provider key / session token / 无关项目
+// 的路径都会进 Python 子进程）。转换器真正需要的只有：解释器与 DLL 加载
+// （PATH/SYSTEMROOT/WINDIR/COMSPEC/PATHEXT）、临时文件（TEMP/TMP，OCR 与 pdf 解析器
+// 用 tempfile）、家目录（USERPROFILE/HOME —— output_guard 的 expanduser）、
+// Tesseract 探测（LOCALAPPDATA）、locale/时区，以及 FormatForge 自己的旋钮
+// （FF_*：FF_MAX_BYTES / FF_TIMEOUT_S / FF_OUTPUT_ROOT / FF_CACHE_* …）与 PYTHON* 参数。
+const ENV_ALLOWLIST = new Set([
+  'PATH', 'Path', 'PATHEXT', 'SYSTEMROOT', 'SystemRoot', 'WINDIR', 'COMSPEC', 'SystemDrive',
+  'TEMP', 'TMP', 'LOCALAPPDATA', 'APPDATA', 'ProgramData', 'PROGRAMFILES', 'PROGRAMFILES(X86)',
+  'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH', 'HOME',
+  'LANG', 'LC_ALL', 'LC_CTYPE', 'TZ',
+])
+
+/** JS-H7: 构造子进程环境（导出以便测试环境策略本身）。 */
+export function buildChildEnv(repoRoot) {
+  const env = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (value === undefined) continue
+    if (ENV_ALLOWLIST.has(key) || key.startsWith('FF_') || key.startsWith('PYTHON')) env[key] = value
+  }
+  env.PYTHONPATH = repoRoot
+  env.PYTHONIOENCODING = 'utf-8'
+  env.PYTHONUTF8 = '1'
+  return env
+}
+
+/**
+ * JS-H7/M1: stderr 只在错误信封里保留「异常类 + 最后一行」——完整 traceback 会连同
+ * 路径/环境细节进入模型读到的工具结果。控制字符一并剥离。
+ */
+export function summarizeStderr(stderr, max = 300) {
+  const lines = String(stderr || '')
+    .split(/\r?\n/)
+    .map((l) => l.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim())
+    .filter(Boolean)
+  if (lines.length === 0) return ''
+  const exc = [...lines].reverse().find((l) => /^[A-Za-z_][\w.]*(Error|Exception|Warning|Interrupt|Exit)\b/.test(l))
+  const last = lines[lines.length - 1]
+  const summary = exc && exc !== last ? `${exc} | ${last}` : last
+  return summary.length > max ? `${summary.slice(0, max)}…` : summary
+}
+
 let cachedPython = null
 
 function candidateInterpreters(repoRoot) {
@@ -134,12 +177,7 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
       child = spawn(python, args, {
         cwd: repoRoot,
         windowsHide: true,
-        env: {
-          ...process.env,
-          PYTHONPATH: repoRoot,
-          PYTHONIOENCODING: 'utf-8',
-          PYTHONUTF8: '1',
-        },
+        env: buildChildEnv(repoRoot),
       })
     } catch (e) {
       resolve({ ok: false, code: -1, error: { kind: 'internal', message: `spawn 失败: ${e.message}` } })
@@ -186,7 +224,7 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
       const line = stdout.split(/\r?\n/).find((l) => l.trim().startsWith('{'))
       if (!line) {
         log?.(`[dsh-formatforge] no protocol JSON on stdout. exit=${exitCode}. stderr tail: ${stderr.slice(-300)}`)
-        resolve(fail('internal', `CLI 未输出协议 JSON (exit=${exitCode})。stderr 尾部: ${stderr.slice(-200)}`))
+        resolve(fail('internal', `CLI 未输出协议 JSON (exit=${exitCode})。stderr 摘要: ${summarizeStderr(stderr)}`))
         return
       }
       try {

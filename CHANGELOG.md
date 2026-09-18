@@ -79,6 +79,18 @@
   `existsSync`→`writeFileSync` 的 TOCTOU 改为 `flag:'wx'` 原子创建 + EEXIST 追加序号。
   回归测试 `test/test-upload-origin.mjs`（18 项断言，含环回/外部/伪造/lookalike
   Origin、产物名拒收、NUL 文件名、同名不覆盖）。
+- **JS-H7 子进程环境白名单 + stderr 摘要（审计 M1）**：Python 子进程此前继承
+  `{...process.env}` —— 整台机器的 provider key / session token / 无关项目路径都进了
+  转换器进程。现在只放行它真正需要的：解释器与 DLL 加载（PATH/SYSTEMROOT/WINDIR/
+  COMSPEC/PATHEXT）、临时文件（TEMP/TMP，OCR 与 pdf 解析器用 tempfile）、家目录
+  （USERPROFILE/HOME，`output_guard` 的 expanduser）、Tesseract 探测（LOCALAPPDATA）、
+  locale/时区，加上 FormatForge 自己的旋钮 `FF_*`（FF_MAX_BYTES / FF_TIMEOUT_S /
+  FF_OUTPUT_ROOT / FF_CACHE_* …）与 `PYTHON*` 参数；`PYTHONPATH` 仍钉在 repoRoot。
+  同时 stderr 不再把尾部 200 字符塞进 `error.message`（那份文本会被渲染进**模型读到的**
+  工具结果）：`summarizeStderr()` 只保留「异常类 + 最后一行」，剥离控制字符并限长。
+  回归测试 `test/test-runner-env-stderr.mjs`（25 项断言：假密钥不泄漏、旋钮透传、
+  traceback 中段内容（含写在中间帧里的假 token）不进摘要）；另实测最小环境下真实
+  转换仍成功（txt → markdown，content/meta.result_id 正常）。
 
 ### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
 
