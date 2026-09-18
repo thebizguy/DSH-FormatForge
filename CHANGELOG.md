@@ -46,6 +46,16 @@
   活会话发通知，永无止境（实测 11s 内 2 次且持续增长）。现在该分支也
   `doneAt.set(name, statSync(full).mtimeMs)`，语义与成功/失败路径一致：只有源文件
   size/mtime 变化才会重新处理。（行为回归覆盖随 JS-H8 的 `test-inbox.mjs` 重写落地。）
+- **JS-H4 同 stem 产物互相覆盖**：产物键从 `<stem>.ff.*` 改为 **`<源文件名含扩展名>.ff.*`**
+  （`foo.pdf` → `foo.pdf.ff.json`）。此前扁平收件箱里 `foo.pdf` 与 `foo.docx` 都写
+  `foo.ff.json`/`foo.ff.md`，后到的转换覆盖先到的产物、并顺手 unlink 掉对方的
+  `.ff.error.txt`；重启后预检还会把被覆盖的源标记成已完成（Python round-1 H4/H5 的 JS
+  镜像）。键映射 name → name+'.ff.*' 是单射，与 Python 侧同为「结构性唯一键」；另加
+  去重护栏：仅当同目录存在大小写不敏感同名的**另一个**源文件时才补源名短哈希后缀。
+  scanStable / processOne / 启动预检统一走 `artifactPaths()`，三者不再各自拼名。
+  **向后兼容**：旧式 `<stem>.ff.json` 仍是「产物」（不再当源），`ff_result` 的 id 查找
+  保留 stem/前缀匹配，旧产物照常可读；升级后仅旧产物对应的源会按新键重转一次（顺带
+  把覆盖年代留下的产物补齐），属一次性成本。（E2E 覆盖随 JS-H8 落地。）
 
 ### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
 
