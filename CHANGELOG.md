@@ -37,6 +37,14 @@
   现按偏移 8..12 的 form type 分派（`WEBP`→webp、`WAVE`→audio/wav、
   `AVI `→binary video）；未知子类型只以 0.6 置信度宣称 RIFF 容器，让扩展名分支
   仍能生效（`core/format_detector.py`）。
+- **FF-M-txt 中文静默乱码**：编码判定顺序改为 BOM → chardet → **全量严格校验**
+  回退链（utf-8 → utf-8-sig → gb18030）→ latin-1 兜底。旧实现只在**前 1024 字节**
+  上验证 utf-8（合法前缀 + 非法尾部 → 误判 utf-8 静默乱码），不识别 BOM，回退链
+  只有 utf-8 → gbk。另外：chardet 对 ISO-8859-*/Windows-125* 这类「永不失败」的
+  单字节猜测不再直接采信（ASCII+GBK 混合文件曾被猜成 ISO-8859-9）；解码改为
+  `errors="replace"` 让损坏字节以 U+FFFD 可见；兜底/未验证编码在
+  `PageContent.metadata` 标记 `encoding_verified=False` / `lossy_decode=True`
+  并记 warning，不再假装解码成功（`parsers/txt_parser.py`）。
 
 ## [1.0.2] - 2026-09-17 — Atria 跨模型审计修复（Worth-fixing-now 12 项；不发布，等用户决定）
 
