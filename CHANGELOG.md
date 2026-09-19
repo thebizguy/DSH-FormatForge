@@ -77,7 +77,7 @@
   躺进收件箱（`.json` 作为**源文档**仍照常接受）；`basename()` 遇 NUL 抛
   `ERR_INVALID_ARG_VALUE`、CR/LF 一路进文件名的问题改为先剥控制字符；
   `existsSync`→`writeFileSync` 的 TOCTOU 改为 `flag:'wx'` 原子创建 + EEXIST 追加序号。
-  回归测试 `test/test-upload-origin.mjs`（18 项断言，含环回/外部/伪造/lookalike
+  回归测试 `test/test-upload-origin.mjs`（19 项断言，含环回/外部/伪造/lookalike
   Origin、产物名拒收、NUL 文件名、同名不覆盖）。
 - **JS-H7 子进程环境白名单 + stderr 摘要（审计 M1）**：Python 子进程此前继承
   `{...process.env}` —— 整台机器的 provider key / session token / 无关项目路径都进了
@@ -96,7 +96,7 @@
   `console.log` 一个布尔值——头条的 JS-H1 协议键漂移正是这样漏掉的（看起来全绿，
   断言全无）。现在：路径从仓库布局推导（`join(here,'..','..')`）、**真实调用
   `ff_result` 取回正文并比对 `.ff.md` 产物 / parser / confidence / file_size**、
-  每条检查都是断言且失败非零退出（39 项）。同批补上此前零覆盖的分支：
+  每条检查都是断言且失败非零退出（37 项）。同批补上此前零覆盖的分支：
   JS-H3 `too_large` 跨 5 个 tick 只通知一次、JS-H4 同 stem 不同扩展名各自保留产物与
   正文、CLI 失败 → `.ff.error.txt`（`timeoutMs=50` 强制超时命中 timeout 分支）、
   重启不重放、retention → `.ff.retired.log`。fixture 用临时 `FF_HOME` 隔离，
