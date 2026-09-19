@@ -8,7 +8,9 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url)) // packages/dsh-formatforge
-const repoRoot = dirname(here) // 仓库根
+// H-JS follow-up/audit: dirname(here) 是 packages/，少了一级——enhance 步骤
+// 指向不存在的 fixtures 路径而静默跳过。仓库根应为 here 的上两级。
+const repoRoot = dirname(dirname(here)) // 仓库根
 
 // ---- stub @deepseek-ai/*（真实环境由 cordis/npx cache 提供）----
 // M19/audit: 这段此前无条件写入、并在退出时无条件删掉整个 `node_modules` ——
@@ -97,3 +99,7 @@ try {
 }
 
 console.log('LOCAL-E2E-DONE')
+// H-JS follow-up/audit: index.mjs apply() 启动的 inbox watcher interval 没有
+// unref()，事件循环永不退出——本脚本挂起 12+ 小时的根因（三条候选修法之一：
+// 测试脚本在收尾处显式退出；产品侧行为不变）。脚本是 CLI 开发自测，直接退出。
+process.exit(0)
