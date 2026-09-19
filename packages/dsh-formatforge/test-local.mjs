@@ -3,7 +3,7 @@
 // 验证 index.mjs 能注册工具、schema 契约合规、且 execute() 真实跑通 Python CLI。
 // 用法：node packages/dsh-formatforge/test-local.mjs
 
-import { mkdirSync, writeFileSync, rmSync, statSync } from 'node:fs'
+import { mkdirSync, writeFileSync, rmSync, statSync, existsSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -11,21 +11,28 @@ const here = dirname(fileURLToPath(import.meta.url)) // packages/dsh-formatforge
 const repoRoot = dirname(here) // 仓库根
 
 // ---- stub @deepseek-ai/*（真实环境由 cordis/npx cache 提供）----
-const stubRoot = join(here, 'node_modules', '@deepseek-ai')
-for (const name of ['dsh-tools', 'dsh-skill-filesystem']) {
-  const dir = join(stubRoot, name)
-  mkdirSync(dir, { recursive: true })
-  const body =
-    name === 'dsh-tools'
-      ? `export function defineTool(spec) { return spec }\n`
-      : `export class FileSystemSkillProvider { constructor() {} }\n`
-  writeFileSync(join(dir, 'index.mjs'), body)
-  writeFileSync(
-    join(dir, 'package.json'),
-    JSON.stringify({ name: `@deepseek-ai/${name}`, version: '0.0.0-local-stub', type: 'module', main: './index.mjs' }),
-  )
+// M19/audit: 这段此前无条件写入、并在退出时无条件删掉整个 `node_modules` ——
+// 在真正装了依赖的包里跑一次就会先覆盖真实 stub、再删掉真实安装。
+// 现在只在自己创建该目录时写入，且只清理自己创建的目录。
+const nmDir = join(here, 'node_modules')
+const stubOwned = !existsSync(nmDir)
+const stubRoot = join(nmDir, '@deepseek-ai')
+if (stubOwned) {
+  for (const name of ['dsh-tools', 'dsh-skill-filesystem']) {
+    const dir = join(stubRoot, name)
+    mkdirSync(dir, { recursive: true })
+    const body =
+      name === 'dsh-tools'
+        ? `export function defineTool(spec) { return spec }\n`
+        : `export class FileSystemSkillProvider { constructor() {} }\n`
+    writeFileSync(join(dir, 'index.mjs'), body)
+    writeFileSync(
+      join(dir, 'package.json'),
+      JSON.stringify({ name: `@deepseek-ai/${name}`, version: '0.0.0-local-stub', type: 'module', main: './index.mjs' }),
+    )
+  }
 }
-process.on('exit', () => rmSync(join(here, 'node_modules'), { recursive: true, force: true }))
+if (stubOwned) process.on('exit', () => rmSync(nmDir, { recursive: true, force: true }))
 
 // ---- fake ctx ----
 const registered = []

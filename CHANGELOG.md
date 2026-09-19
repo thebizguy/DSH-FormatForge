@@ -102,6 +102,24 @@
   重启不重放、retention → `.ff.retired.log`。fixture 用临时 `FF_HOME` 隔离，
   退出时清理（含 M19：只清理自己创建的 stub `node_modules`）。
 
+### 1.0.3 — Atria 审计「JS 层」同文件 medium 清扫（`test(JS-sweep)`）
+
+- **M7 跨语言分页不一致**：`tools/_truncate.mjs` 的段落阈值此前是**浮点** `maxChars / 2`，
+  Python 是 `max_chars // 2`（`core/utils.py:119`）——奇数 `max_chars` 时，恰好落在
+  `max//2` 的段落边界会被 Python 保留、被 JS 丢弃，两边的 chunk 与 `next_offset` 就此分叉。
+  改为 `Math.floor(maxChars / 2)`，并给一致性测试补 3 个奇数 `max_chars` 用例
+  （边界正好在 `max//2` / 略低于 / 带 offset），现在 16/16 与 Python 逐字节一致
+  （测试本意是「用奇数 max 抓住浮点阈值」）。
+- **stdout 无上限**（审计 medium，`python-runner.mjs:151`）：stderr 有 64KB 上限而 stdout
+  完全没有，异常输出能把活着的 harness 进程 OOM 掉。现在有 `DEFAULT_MAX_STDOUT_BYTES`
+  （512MB，正常 100MB 输入的信封远低于此值），超限立即 `killTree` 并返回
+  `kind: 'output_too_large'`；可用 `FF_MAX_STDOUT_BYTES` 收紧。回归测试
+  `test/test-runner-stdout-cap.mjs`（7 项：极小上限触发 + 恢复默认后同一转换仍成功）。
+- **M19 `test-local.mjs` stub 破坏真实安装**：stub 写入与其退出清理此前都**无条件**执行，
+  在真正装了依赖的包里跑一次会先覆盖真实的 `@deepseek-ai/dsh-tools`，再删掉整个
+  `node_modules`（等于毁掉安装）。现在只在 `node_modules` 不存在时写入，且只清理
+  自己创建的那个目录。
+
 ### H18 Option C（用户决策实施）：收缩 advertised-but-broken 格式宣称
 
 - `.doc/.ppt/.xlsb` 从宣称中移除（python-docx/python-pptx/openpyxl 均不支持，

@@ -59,7 +59,9 @@ export function smartTruncate(text, maxChars, start = 0) {
     // 没找到多文件分隔符 → 走原有逻辑（段落 > 行 > 硬切）
     cut = window.lastIndexOf('\n\n')
     sepLen = 2 // "\n\n"
-    if (cut < maxChars / 2) {
+    // audit M7: Python 用 `max_chars // 2`（下取整）；JS 此前是浮点 `maxChars / 2`，
+    // 奇数 max_chars 时恰好落在 max//2 的段落边界会被 Python 保留、被 JS 丢弃 → 分页不一致
+    if (cut < Math.floor(maxChars / 2)) {
       cut = window.lastIndexOf('\n')
       sepLen = 1 // "\n"
     }

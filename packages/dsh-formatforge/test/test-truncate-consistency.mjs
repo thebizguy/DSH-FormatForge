@@ -74,6 +74,26 @@ const cases = [
     max: 30,
     start: 0,
   },
+  // audit M7: 奇数 max_chars —— Python 用 `max // 2`（下取整），JS 曾用浮点 `/2`：
+  // 段落边界恰好落在 max//2 时 Python 保留、JS 丢弃（本用例的 cut 正好在 15）
+  {
+    name: 'odd max_chars: paragraph boundary at exactly max//2',
+    input: 'ABCDEFGHIJKLMNO\n\nrest of the paragraph follows here',
+    max: 31,
+    start: 0,
+  },
+  {
+    name: 'odd max_chars: paragraph boundary just below max//2',
+    input: 'ABCDEFGHIJKLMN\n\nrest of the paragraph follows here',
+    max: 31,
+    start: 0,
+  },
+  {
+    name: 'odd max_chars with offset',
+    input: 'lead-in text here\n\nABCDEFGHIJKLMNO\n\nrest of the paragraph follows',
+    max: 31,
+    start: 12,
+  },
 ]
 
 // --- 调 Python smart_truncate 取真值 ---

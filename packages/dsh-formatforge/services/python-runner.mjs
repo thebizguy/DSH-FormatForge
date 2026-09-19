@@ -16,6 +16,8 @@ import { homedir, platform } from 'node:os'
 const IS_WIN = platform() === 'win32'
 
 export const DEFAULT_TIMEOUT_MS = 120_000
+/** stdout 硬上限（审计 medium：此前无上限）；100MB 输入的正常信封远低于此值。 */
+export const DEFAULT_MAX_STDOUT_BYTES = 512 * 1024 * 1024
 const MIN_PYTHON = [3, 10]
 
 // ─── JS-H7: 子进程环境白名单 ───
@@ -187,13 +189,31 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
     let stdout = ''
     let stderr = ''
     let timedOut = false
+    // audit medium：stdout 此前**无上限**累积（stderr 有 64KB 上限而它没有），
+    // 异常输出能把活着的 harness 进程 OOM 掉。正常输入（FF_MAX_BYTES 默认 100MB）
+    // 不会触及默认 512MB；可用 FF_MAX_STDOUT_BYTES 收紧（测试用）。
+    const stdoutCap = Number(process.env.FF_MAX_STDOUT_BYTES) > 0
+      ? Number(process.env.FF_MAX_STDOUT_BYTES)
+      : DEFAULT_MAX_STDOUT_BYTES
+    let stdoutBytes = 0
+    let stdoutOverflow = false
 
     const timer = setTimeout(() => {
       timedOut = true
       killTree(child)
     }, timeoutMs)
 
-    child.stdout.on('data', (d) => (stdout += d))
+    child.stdout.on('data', (d) => {
+      stdoutBytes += d.length
+      if (stdoutBytes > stdoutCap) {
+        if (!stdoutOverflow) {
+          stdoutOverflow = true
+          killTree(child)
+        }
+        return
+      }
+      stdout += d
+    })
     child.stderr.on('data', (d) => {
       stderr += d
       if (stderr.length > 64_000) stderr = stderr.slice(-32_000)
@@ -219,6 +239,10 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
       clearTimeout(timer)
       if (timedOut) {
         resolve(fail('timeout', `转换超时（>${Math.round(timeoutMs / 1000)}s），已终止进程`))
+        return
+      }
+      if (stdoutOverflow) {
+        resolve(fail('output_too_large', `CLI 输出超过上限（>${stdoutCap} 字节），已终止进程；可用 FF_MAX_STDOUT_BYTES 调整`))
         return
       }
       const line = stdout.split(/\r?\n/).find((l) => l.trim().startsWith('{'))
