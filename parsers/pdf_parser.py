@@ -156,7 +156,14 @@ class PDFParser(BaseParser):
         two_column: bool = True,
     ) -> Generator[PageContent, None, None]:
         """
-        流式解析 PDF 文件，逐页生成（减少内存占用）
+        解析 PDF 文件，返回选中页的 PageContent 序列。
+
+        FF-L-pdf/audit: 这个方法名为 parse_stream 且旧 docstring 声称「逐页生成
+        （减少内存占用）」，但实际实现是把所有选中页解析完、做完全书级标注
+        （structure_fidelity 需要跨页字号中位数、table_semantics 需要跨页表格
+        合并）后才一次性 yield —— 即「缓冲全部选中页」。逐页真流式会牺牲这两项
+        全书级质量增强，故这里选择修正文档而非改语义：本方法是“生成器形态的批量
+        解析”，调用方拿到的是完整的选中页列表（顺序按 pages 请求序）。
 
         Args:
             file_path: PDF 文件路径
@@ -168,7 +175,7 @@ class PDFParser(BaseParser):
             two_column: 双栏阅读序还原
 
         Yields:
-            PageContent: 每一页的内容
+            PageContent: 选中页的内容（在全部解析与全书标注完成后按请求序产出）
         """
         selected = self._parse_page_selection(pages)
         selection_order = None
@@ -324,8 +331,14 @@ class PDFParser(BaseParser):
         text = page.extract_text() or ""
 
         # E2-3: 双栏阅读序还原 —— 页宽>高且词框呈左右两簇时按栏拼接
-        if two_column and self._looks_two_column(page):
-            text = self._reorder_two_column(page)
+        if two_column:
+            # FF-L-pdf/audit: 检测与重排共用一次 extract_words（原为两次整页词级提取）
+            try:
+                _words = page.extract_words() or []
+            except Exception:
+                _words = None
+            if self._looks_two_column(page, _words):
+                text = self._reorder_two_column(page, _words)
 
         # E2-2: 剔除页眉/页脚行
         furniture_removed = 0
@@ -442,13 +455,16 @@ class PDFParser(BaseParser):
     #: 中缝空白带宽度（相对页宽）
     _GUTTER_RATIO = 0.04
 
-    def _looks_two_column(self, page) -> bool:
+    def _looks_two_column(self, page, words=None) -> bool:
         """检测页面是否为双栏排版：宽>高 + 词框 x 分布呈左右两簇且中缝清晰。"""
         try:
             w, h = float(page.width), float(page.height)
             if h == 0 or w / h < self._TWO_COL_ASPECT:
                 return False
-            words = page.extract_words() or []
+            # FF-L-pdf/audit: words 可由调用方传入复用，避免与 _reorder_two_column
+            # 各自 page.extract_words()（每页两次词级提取）。
+            if words is None:
+                words = page.extract_words() or []
             if len(words) < 30:
                 return False
             gutter_lo = w * (0.5 - self._GUTTER_RATIO)
@@ -462,13 +478,15 @@ class PDFParser(BaseParser):
             logger.debug("双栏检测失败（按单栏处理）: %s", e)
             return False
 
-    def _reorder_two_column(self, page) -> str:
+    def _reorder_two_column(self, page, words=None) -> str:
         """按左栏全部行 → 右栏全部行的顺序重建文本。"""
         try:
             w = float(page.width)
             gutter_lo = w * (0.5 - self._GUTTER_RATIO)
             gutter_hi = w * (0.5 + self._GUTTER_RATIO)
-            words = page.extract_words() or []
+            # FF-L-pdf/audit: 复用检测阶段已提取的 words，省一次整页 extract_words。
+            if words is None:
+                words = page.extract_words() or []
 
             def cluster_text(side_words):
                 lines_by_top: dict[float, list[tuple[float, str]]] = {}
@@ -543,15 +561,21 @@ class PDFParser(BaseParser):
         return False
 
     def _merge_text_and_ocr(self, pdf_text: str, ocr_text: str) -> str:
-        """合并 PDF 文字层和 OCR 识别结果"""
-        pdf_lines = set(line.strip() for line in pdf_text.split("\n") if line.strip())
-        ocr_lines = [line.strip() for line in ocr_text.split("\n") if line.strip()]
+        """合并 PDF 文字层和 OCR 识别结果。
 
-        merged = []
+        FF-L-pdf/audit: 此前把 PDF 行塞进 set —— 行序丢失、max() 打平分时
+        结果不确定、且对每行做 O(n) 相似度扫描（整体 O(n²)）。改为保序去重
+        的 list + 有序遍历，输出确定且保留文档原始行序。
+        """
+        # 保序去重（dict.fromkeys 保持首次出现顺序）
+        pdf_lines = list(dict.fromkeys(line.strip() for line in pdf_text.split("\n") if line.strip()))
+        ocr_lines = list(dict.fromkeys(line.strip() for line in ocr_text.split("\n") if line.strip()))
+
+        merged: list[str] = []
         for line in ocr_lines:
             # 如果 OCR 行与 PDF 文字层高度相似，使用 PDF 文字（更准确）
             if any(self._text_similarity(line, pdf_line) > 0.8 for pdf_line in pdf_lines):
-                # 找到最相似的 PDF 行
+                # 找到最相似的 PDF 行（保序 list，max 打平分时取行序靠前者，结果确定）
                 best_match = max(pdf_lines, key=lambda p: self._text_similarity(line, p))
                 merged.append(best_match)
             else:

@@ -41,17 +41,19 @@ class MarkdownParser(BaseParser):
         elements = []
         raw_lines: list[str] = []
         elem_idx = 0
-        line_offset = 0
 
-        # 步骤1：提取 YAML 前言
-        content, front_matter = self._extract_front_matter(content)
+        # 步骤1：提取前言（YAML --- / TOML +++ / JSON {}）
+        content, front_matter, fm_type, fm_lines = self._extract_front_matter(content)
+        # FF-L-md/audit: 前言占据的行数必须计入正文行号——此前 metadata.line 恒为
+        # 前言之后的相对行号，比真实文件行号小了整段前言的长度。
+        line_offset = fm_lines
         if front_matter is not None:
             elements.append(
                 ExtractedElement(
                     elementId=f"elem_1_{elem_idx}",
                     elementType="front_matter",
                     content=front_matter,
-                    metadata={"type": "yaml"},
+                    metadata={"type": fm_type},
                 )
             )
             raw_lines.append(f"[Front Matter]\n{front_matter}")
@@ -187,18 +189,20 @@ class MarkdownParser(BaseParser):
                 continue
 
             # --- 无序列表 ---
-            ul_match = re.match(r"^(\s*)[-*+]\s+(.+)$", stripped)
+            # FF-L-md/audit: 必须匹配原始行——此前对 .strip() 后的串匹配，indent
+            # 捕获组恒为空串，嵌套列表的 depth / items[].indent 永远是 0。
+            ul_match = re.match(r"^(\s*)[-*+]\s+(.+)$", line)
             if ul_match:
                 indent = ul_match.group(1)
                 items: list[dict] = []
                 start_line = current_line
                 while i < len(lines):
-                    li_match = re.match(r"^(\s*)[-*+]\s+(.+)$", lines[i].strip())
+                    li_match = re.match(r"^(\s*)[-*+]\s+(.+)$", lines[i])
                     if not li_match:
                         break
                     # 检查缩进层级（嵌套列表支持）
                     item_indent = li_match.group(1)
-                    item_text = li_match.group(2)
+                    item_text = li_match.group(2).rstrip()
                     items.append(
                         {
                             "text": item_text,
@@ -436,14 +440,55 @@ class MarkdownParser(BaseParser):
             )
         ]
 
-    def _extract_front_matter(self, content: str) -> tuple[str, str | None]:
-        """提取 YAML 前言（--- ... --- 之间的内容）"""
-        fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
-        if fm_match:
-            front_matter = fm_match.group(1).strip()
-            remaining = content[fm_match.end() :]
-            return remaining, front_matter
-        return content, None
+    def _extract_front_matter(self, content: str) -> tuple[str, str | None, str, int]:
+        """提取 Markdown 前言，返回 (剩余正文, 前言文本, 类型, 前言占用行数)。
+
+        FF-L-md/audit: 支持三种前言格式（此前只有 YAML ---，TOML +++ 与 JSON
+        会被当作正文）；先剥 UTF-8 BOM 再判定（BOM 会顶掉行首锚点让 --- 永不
+        匹配）。行数包含分隔符行本身，供调用方修正 metadata.line 的偏移。
+        """
+        content = content.lstrip("\ufeff")  # BOM 在前言判定之前剥掉
+
+        def _strip_block(body: str) -> str:
+            """去掉 JSON 前言携带的 content/body/markdown 字段——它属于正文而非元数据"""
+            import json
+
+            try:
+                data = json.loads(body)
+            except (ValueError, TypeError):
+                return body
+            if isinstance(data, dict):
+                for key in ("content", "body", "markdown"):
+                    if isinstance(data.get(key), str):
+                        del data[key]
+                return json.dumps(data, ensure_ascii=False, indent=2)
+            return body
+
+        for fence, fm_type in (("---", "yaml"), ("+++", "toml")):
+            fm_match = re.match(
+                rf"^{re.escape(fence)}\s*\n(.*?)\n{re.escape(fence)}\s*(?:\n|$)", content, re.DOTALL
+            )
+            if fm_match:
+                return content[fm_match.end() :], fm_match.group(1).strip(), fm_type, content[: fm_match.end()].count("\n")
+
+        # JSON 前言：首字符是 { 且整体（或首段）是合法 JSON 对象
+        if content.startswith("{"):
+            import json
+
+            try:
+                data, end = json.JSONDecoder().raw_decode(content)
+            except (ValueError, TypeError):
+                data = None
+            if isinstance(data, dict):
+                remaining = content[end:].lstrip("\r\n")
+                # {"content": "..."} 风格：content 字段才是真正的正文
+                body_field = next((k for k in ("content", "body", "markdown") if isinstance(data.get(k), str)), None)
+                if body_field is not None:
+                    remaining = data[body_field]
+                front_matter = _strip_block(json.dumps(data, ensure_ascii=False))
+                return remaining, front_matter, "json", content[:end].count("\n") + 1
+
+        return content, None, "yaml", 0
 
     def _parse_table_row(self, line: str) -> list[str]:
         """解析表格行"""

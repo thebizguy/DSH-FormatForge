@@ -68,11 +68,41 @@ def _emit(payload: dict[str, Any]) -> None:
     sys.stdout.flush()
 
 
+# FF-L-main/audit: 协议 JSON 会把完整本地路径（含用户名目录）和原始异常文本
+# （可能夹带内部堆栈/路径片段）回传给调用方 —— 信息泄露。对外 message 一律先过
+# 这道收敛：绝对路径收敛为 basename，超长文本截断。错误 kind/exit_code 不变，
+# 调用方仍可按类型分支；只有「人读的路径/堆栈细节」被收敛。
+_MAX_MESSAGE_CHARS = 400
+
+
+def _safe_message(message: Any, *, _path_token: Path | None = None) -> str:
+    """收敛对外错误消息：绝对路径→basename，长度截断。
+
+    _path_token：调用方已知的源文件路径，其 str() 在消息里替换成 basename；
+    其余出现的路径形态（盘符:/ 或 / 开头的长 token）同样按 basename 收敛。
+    """
+    text = str(message)
+    if _path_token is not None:
+        try:
+            text = text.replace(str(_path_token), Path(_path_token).name)
+        except Exception:
+            pass
+    # 收敛任意形如 X:\...\... 或 /a/b/c 的绝对路径为 basename
+    import re
+
+    text = re.sub(r"[A-Za-z]:\\[^\s\"':;]+", lambda m: Path(m.group(0)).name, text)
+    text = re.sub(r"(?<![\w:])/(?:[^\s\"':;/]+/)+([^\s\"':;/]+)", r"\1", text)
+    if len(text) > _MAX_MESSAGE_CHARS:
+        text = text[:_MAX_MESSAGE_CHARS] + "…(truncated)"
+    return text
+
+
 def _fail(kind: str, message: str, *, code: ErrorCode | None = None) -> int:
     """失败出口。kind 为旧字符串兼容参数；优先用 code 枚举。"""
     ec = code or _kind_to_code(kind)
     exit_code = exit_code_of(ec)
-    err = {"kind": ec.value, "message": message}
+    # FF-L-main/audit: 所有协议错误消息统一收敛（绝对路径→basename、超长截断）
+    err = {"kind": ec.value, "message": _safe_message(message)}
     _emit({"ok": False, "code": 4000 + exit_code, "error": err})
     return exit_code
 

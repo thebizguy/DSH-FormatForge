@@ -157,6 +157,23 @@ def cmd_diff(args: argparse.Namespace) -> int:
                 },
             )
 
+    # FF-L-diff/audit: 同一文件 self-diff 此前是「无操作空 diff」却返回 ok:true
+    # —— 调用方无法区分「真的没差异」和「传错了同一个路径」。显式报参数错误。
+    try:
+        same_file = path_a.resolve() == path_b.resolve()
+    except OSError:
+        same_file = str(path_a) == str(path_b)
+    if same_file:
+        return _emit_diff(
+            ok=False,
+            code=4000 + exit_code_of(ErrorCode.BAD_REQUEST),
+            data={},
+            error={
+                "kind": ErrorCode.BAD_REQUEST.value,
+                "message": f"path_a 与 path_b 是同一文件（{path_a.name}），无 diff 意义；请传入两个不同路径",
+            },
+        )
+
     try:
         lines_a = _read_text_lines(path_a, fmt)
         lines_b = _read_text_lines(path_b, fmt)
@@ -347,7 +364,24 @@ def _compute_diff(
     deletions = 0
     unchanged = 0
     elided = 0
+    # FF-L-diff/audit: 不再先把完整 diff（含全部未变更上下文行）一次性拼成整串
+    # 再 [:max_chars] 截断——那样会先物化整份公共内容（大文件 O(N) 内存）才丢。
+    # 这里按行增量累计预算，超过 max_chars 即封顶并标记 truncated。
     diff_chunks: list[str] = []
+    budget = max_chars
+    truncated = False
+
+    def _emit_line(s: str) -> bool:
+        """把一行计入 diff 输出；预算耗尽返回 False（调用方停止追加）。"""
+        nonlocal budget, truncated
+        if truncated:
+            return False
+        diff_chunks.append(s)
+        budget -= len(s) + 1
+        if budget < 0:
+            truncated = True
+        return not truncated
+
     for tag, i1, i2, j1, j2 in opcodes:
         if tag == "equal":
             unchanged += i2 - i1
@@ -357,35 +391,35 @@ def _compute_diff(
             block = i2 - i1
             if block <= 2 * context:
                 for ln in lines_a[i1:i2]:
-                    diff_chunks.append(" " + ln)
+                    _emit_line(" " + ln)
             else:
                 for ln in lines_a[i1 : i1 + context]:
-                    diff_chunks.append(" " + ln)
+                    _emit_line(" " + ln)
                 skipped = block - 2 * context
                 elided += skipped
-                diff_chunks.append(f"... 省略 {skipped} 行未变更内容 ...")
+                _emit_line(f"... 省略 {skipped} 行未变更内容 ...")
                 if context:
                     for ln in lines_a[i2 - context : i2]:
-                        diff_chunks.append(" " + ln)
+                        _emit_line(" " + ln)
         elif tag == "delete":
             deletions += i2 - i1
             for ln in lines_a[i1:i2]:
-                diff_chunks.append("-" + ln)
+                _emit_line("-" + ln)
         elif tag == "insert":
             additions += j2 - j1
             for ln in lines_b[j1:j2]:
-                diff_chunks.append("+" + ln)
+                _emit_line("+" + ln)
         elif tag == "replace":
             deletions += i2 - i1
             additions += j2 - j1
             for ln in lines_a[i1:i2]:
-                diff_chunks.append("-" + ln)
+                _emit_line("-" + ln)
             for ln in lines_b[j1:j2]:
-                diff_chunks.append("+" + ln)
+                _emit_line("+" + ln)
 
     similarity = round(unchanged * 2 / (len(lines_a) + len(lines_b) + 1e-9), 3) if (lines_a or lines_b) else 1.0
     diff_text = "\n".join(diff_chunks)
-    truncated = len(diff_text) > max_chars
+    # 预算封顶 + 尾部再保险截断，保证 diff_preview 长度 ≤ max_chars
     diff_preview = diff_text[:max_chars]
 
     return {

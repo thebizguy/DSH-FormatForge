@@ -71,14 +71,26 @@ def _extract_html_text(html_content: str | bytes) -> str:
     """从 HTML/XHTML 中提取纯文本"""
     text: str
     if isinstance(html_content, bytes):
-        # 尝试检测编码（始终对原始字节解码，不回写参数）
-        for encoding in ("utf-8", "utf-16", "gbk", "latin-1"):
+        # FF-L-epub-odf/audit: latin-1 对任意字节都解码成功，放在候选链里会
+        # 静默「赢」过真实编码（gbk 字节解成 latin-1 得到合法乱码）。先用 XML
+        # 声明的 encoding（XHTML 章节通常自带），再严格尝试候选；全部失败才用
+        # utf-8/replace 兜底并以 U+FFFD 显式标记低置信，绝不裸回退 latin-1。
+        declared = None
+        head = html_content[:1024].decode("ascii", errors="ignore")
+        import re
+
+        m = re.search(r"""encoding\s*=\s*['"]([A-Za-z0-9._-]+)['"]""", head)
+        if m:
+            declared = m.group(1)
+        candidates = ([declared] if declared else []) + ["utf-8", "utf-16", "gbk"]
+        for encoding in candidates:
             try:
                 text = html_content.decode(encoding)
                 break
-            except (UnicodeDecodeError, UnicodeError):
+            except (UnicodeDecodeError, UnicodeError, LookupError):
                 continue
         else:
+            logger.debug("EPUB 章节编码检测失败，以 utf-8/replace 低置信兜底")
             text = html_content.decode("utf-8", errors="replace")
     else:
         text = html_content

@@ -230,18 +230,35 @@ class TestJsonFormatLineAccounting:
         assert lines == [compact], f"json 行被重新美化: {lines}"
 
     def test_cli_lines_match_content_line_count(self, tmp_path, capsys):
-        """端到端口径：lines_a/lines_b 等于 translate content 自身的行数。"""
+        """端到端口径：lines_a/lines_b 等于 translate content 自身的行数。
+
+        FF-L-diff/audit: self-diff（path_a == path_b）现在报 bad_request，
+        所以这里改为「同内容、不同路径」的两份文件来核对行数口径。
+        """
         from formatforge.__main__ import translate_file_data
 
-        doc = tmp_path / "d.json"
-        doc.write_text('{"a": 1, "b": [1, 2, 3], "c": {"d": "e"}}', encoding="utf-8")
+        doc_a = tmp_path / "d_a.json"
+        doc_b = tmp_path / "d_b.json"
+        body = '{"a": 1, "b": [1, 2, 3], "c": {"d": "e"}}'
+        doc_a.write_text(body, encoding="utf-8")
+        doc_b.write_text(body, encoding="utf-8")
 
-        data, code = translate_file_data(doc, "json", "auto", quality=False)
+        data, code = translate_file_data(doc_a, "json", "auto", quality=False)
         assert code == 0, data
         source_lines = len(str(data["content"]).splitlines())
 
-        payload, rc = _run_diff(capsys, str(doc), str(doc), "--format", "json")
+        payload, rc = _run_diff(capsys, str(doc_a), str(doc_b), "--format", "json")
         assert rc == 0, payload
         assert payload["data"]["lines_a"] == source_lines
         assert payload["data"]["lines_b"] == source_lines
         assert payload["data"]["additions"] == 0
+
+    def test_self_diff_is_an_error(self, tmp_path, capsys):
+        """FF-L-diff/audit: 同一文件 self-diff 必须报错（不是无操作空 diff）。"""
+        doc = tmp_path / "d.json"
+        doc.write_text('{"a": 1}', encoding="utf-8")
+        payload, rc = _run_diff(capsys, str(doc), str(doc))
+        assert rc != 0
+        assert payload["ok"] is False
+        assert payload["error"]["kind"] == "bad_request"
+        assert "同一文件" in payload["error"]["message"]

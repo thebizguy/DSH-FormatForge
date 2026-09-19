@@ -44,14 +44,29 @@ class CSVParser(BaseParser):
         raw_lines = []
         row_idx = 0
         all_rows = []
+        ragged_rows = 0
 
         try:
-            with open(file_path, encoding=encoding, errors="ignore", newline="") as f:
+            # FF-L-csv/audit: errors="ignore" 会把 UTF-8 BOM 解成 ﻿ 字符粘到
+            # 首行第一列（表头变成 "﻿id"）；utf-8-sig 透明剥 BOM，gbk 不受影响。
+            read_encoding = "utf-8-sig" if encoding.startswith("utf-8") else encoding
+            with open(file_path, encoding=read_encoding, errors="ignore", newline="") as f:
                 reader = csv.reader(f, delimiter=delimiter)
+                # 列宽以首行（表头/数据首行）为准：短行补 ""、长行截断，否则下游
+                # 按 header 宽度取列时会错位/越界。
+                width: int | None = None
                 for row in reader:
                     # 过滤空行
                     if not any(cell.strip() for cell in row):
                         continue
+                    if width is None:
+                        width = len(row)
+                    elif len(row) < width:
+                        row = row + [""] * (width - len(row))
+                        ragged_rows += 1
+                    elif len(row) > width:
+                        row = row[:width]
+                        ragged_rows += 1
                     all_rows.append(row)
                     row_text = delimiter.join(cell.strip() for cell in row)
                     raw_lines.append(row_text)
@@ -84,6 +99,7 @@ class CSVParser(BaseParser):
                 "delimiter": delimiter,
                 "header": header_text,
                 "has_header": has_header,
+                "ragged_rows": ragged_rows,
             },
         )
 

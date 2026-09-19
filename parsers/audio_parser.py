@@ -296,10 +296,13 @@ class AudioParser(BaseParser):
                 audio_size = max(0, file_size - id3v2_size - 10)
 
                 # 检查 ID3v1 (尾部 128 字节)
-                f.seek(-128, os.SEEK_END)
-                tail = f.read(3)
-                if tail == b"TAG":
-                    audio_size -= 128
+                # FF-L-audio/audit: 文件 < 128 字节时 seek(-128, SEEK_END) 直接
+                # OSError，把后续解析一并拖进 except —— 先确认文件够长。
+                if metadata["file_size"] >= 128:
+                    f.seek(-128, os.SEEK_END)
+                    tail = f.read(3)
+                    if tail == b"TAG":
+                        audio_size = max(0, audio_size - 128)
 
                 if br > 0:
                     duration_sec = (audio_size * 8) / (br * 1000)
@@ -307,10 +310,12 @@ class AudioParser(BaseParser):
                     metadata["duration_formatted"] = self._format_duration(duration_sec)
 
             # 尝试从尾部读取 ID3v1 (128 字节)
-            f.seek(-128, os.SEEK_END)
-            tail = f.read(128)
-            if tail[:3] == b"TAG":
-                self._parse_id3v1(tail, metadata)
+            # FF-L-audio/audit: < 128 字节的小文件直接跳过（seek 会 OSError）。
+            if metadata["file_size"] >= 128:
+                f.seek(-128, os.SEEK_END)
+                tail = f.read(128)
+                if tail[:3] == b"TAG":
+                    self._parse_id3v1(tail, metadata)
 
         except Exception as e:
             logger.debug("MP3 解析细节错误: %s", e)
