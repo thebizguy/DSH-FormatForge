@@ -7,6 +7,41 @@
 
 ## [Unreleased]
 
+### FF-L-js-lows — harness tools 收尾批次（tools\*.mjs/.ps1，2026-09-19；不发布）
+
+> 实施落点在 `D:\Deepseek-harness\tools\`（本次起该工作区已有本地 git 仓库，
+> 一 fix 一 commit；llm-gateway 的改动**在下一次网关重启时才生效**）。
+
+- **FF-L-status**：`tools/dashboard.ps1` 启动器默认端口从 3099 改为 **3097** ——
+  旧默认与 `start-web.ps1` 管的 Dashboard v1（3099）同端口竞争；3098 已是
+  Dashboard v2。阻塞提示同时补上 `$p` 非空检查与 `ProcessName -eq 'node'`
+  （裸 `Stop-Process -Id $p` 有 PID 复用杀错进程的风险），node 解析改为
+  `Get-Command` 一次解析到绝对路径并在缺失时报错（与 `start-web.ps1` 对齐）。
+  端口族文档更新于 `tools/SESSION-BROWSER.md`。
+- **FF-L-session**：`tools/session-browser.mjs`——`--port 0`/非整数端口改为
+  显式报错退出 2（原先静默回退 3111）；`EADDRINUSE` 捕获并给出可读提示 exit 1；
+  `--workspace` 由子串匹配收紧为**精确匹配**（单一尾部 `*` 作前缀通配的唯一
+  选入口），文档同步；搜索高亮改为**转义前**对原始文本执行（查询含 `&`/`<`
+  时不再匹配 `&amp;`/`&lt;` 实体形态），`<mark>` 包裹的片段各自转义，
+  输出仍零注入；`/api/sessions` 新增 `?offset=&limit=`（≤500，缺省仍全量、
+  向后兼容，响应带 `total`）。
+- **FF-L-gateway**：`tools/llm-gateway.mjs`——①三个 ingress 不再把整个客户端
+  body 展开转发上游（`{...body, model}`），改为按端点白名单
+  （chat-completions / anthropic-messages / openai-responses 三份字段表，
+  `in` 判存以保留显式 `null`/`false`），客户端再无法注入任意上游参数；
+  ②Anthropic 流翻译只在**确实开过** content block 后才发 `content_block_stop`
+  （原先空回包会发 `index:-1` 的非法 stop），文本块在 tool_use 块前正确关闭；
+  ③`readBody` 加 30 s 总时限（坏客户端不能无限占用连接与读缓冲），配合
+  既有的 64 MB 尺寸上限。网关已在反挂死（AbortSignal 缺失/客户端断连）批次
+  中改好，本轮仅为字段收口。生效条件：**仅语法校验；不重启、下次重启生效**。
+- **FF-L-docs**：H18 收缩宣称（`.doc/.ppt/.xlsb` 从宣称中移除）在全部宣称面
+  复核为一致——`README.md`、`packages/dsh-formatforge/skills/*/SKILL.md`、
+  `package.json` description、`index.mjs`、`cordis.patch.yml` 均只剩
+  docx/pptx/xlsx 等真实支持格式，无遗留 `.doc/.ppt/.xlsb` 宣称；
+  `test/unit/test_format_capabilities.py` 的 DataFormat 派生断言
+  （advertised ⊆ DataFormat、无扩展名别名、显式锁 `not formats & {doc,ppt,xlsb}`）
+  **保持为格式宣称的唯一事实来源**。
+
 ### 1.0.3 — Atria 审计「JS 层」修复批次（JS-H1…JS-H8；进行中；不发布）
 
 > 与 Python 批次相同约定：一个 commit 一项修复（`fix(JS-H<n>)`），每个修复自带回归
