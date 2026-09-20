@@ -104,6 +104,22 @@ class TestBatch:
         assert report["skipped"] == 0
         assert code == 0
 
+    def test_report_filename_source_keeps_a_separate_artifact(self, tmp_path):
+        source = tmp_path / "report-source"
+        source.mkdir()
+        original = source / "_batch_report.json"
+        original.write_text('{"source": "must survive"}', encoding="utf-8")
+
+        code, report, out = _run(tmp_path, source, format="json", force=True)
+
+        assert code == 0
+        assert report["ok_count"] == 1
+        artifact = Path(report["results"][0]["out"])
+        assert artifact.name != "_batch_report.json"
+        assert artifact.exists()
+        assert artifact.read_text(encoding="utf-8").strip()
+        assert json.loads((out / "_batch_report.json").read_text(encoding="utf-8"))["total"] == 1
+
     def test_empty_source_reports_not_found(self, tmp_path):
         empty = tmp_path / "empty"
         empty.mkdir()

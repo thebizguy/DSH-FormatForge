@@ -167,7 +167,8 @@ def _plan_out_paths(
     两者都是并发写、后写覆盖先写，而且两行都报 ok。
 
     消歧只发生在**真碰撞**的那一组上（不碰撞的文件名一个字母都不变）：
-    先按扩展名限定，仍撞就再加源路径哈希。
+    先按扩展名限定，仍撞就再加源路径哈希。`_batch_report.json`
+    是批次自身的保留名，源文件映射到该名时也走同一消歧链。
     """
     uniq = list(dict.fromkeys(targets))
     preferred = {t: _out_path_for(t, source_dir, out_dir, out_ext, recursive) for t in uniq}
@@ -176,10 +177,11 @@ def _plan_out_paths(
         groups.setdefault(_out_key(preferred[t]), []).append(t)
 
     plan: dict[Path, Path] = {}
-    # 不碰撞的键是「已被占用」的——消歧名不许撞上它们
-    taken = {key for key, group in groups.items() if len(group) == 1}
-    for group in groups.values():
-        if len(group) == 1:
+    # 不碰撞的键和批次报告名都是「已被占用」的——消歧名不许撞上它们。
+    reserved = {_out_key(out_dir / "_batch_report.json")}
+    taken = reserved | {key for key, group in groups.items() if len(group) == 1}
+    for key, group in groups.items():
+        if len(group) == 1 and key not in reserved:
             plan[group[0]] = preferred[group[0]]
             continue
         qualified = {t: _ext_qualified(preferred[t], t, out_ext) for t in group}
