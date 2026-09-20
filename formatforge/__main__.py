@@ -238,7 +238,16 @@ def cmd_translate(args: argparse.Namespace) -> int:
     source: Any
 
     if args.stdin_text:
-        source = sys.stdin.read()
+        # T3-7/audit: stdin 也是公开输入面，与文件路径共用同一字节上限。
+        # 只多读一个字符，先防止无界 read；再按 CLI 协议的 UTF-8
+        # 字节口径校验，所以多字节文本也不会绕过 FF_MAX_BYTES。
+        source = sys.stdin.read(settings.FF_MAX_BYTES + 1)
+        stdin_size = len(source.encode("utf-8"))
+        if stdin_size > settings.FF_MAX_BYTES:
+            return _fail(
+                "bad_request",
+                f"stdin {stdin_size} 字节超过上限 {settings.FF_MAX_BYTES}",
+            )
     else:
         path = Path(args.path) if args.path else None
         if not path:

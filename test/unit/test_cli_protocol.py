@@ -109,6 +109,23 @@ class TestTranslateText:
         assert {"parser", "file_size", "elapsed_ms"} <= set(meta)
         assert code == 0
 
+    def test_stdin_text_over_ff_max_bytes_is_bad_request(self, monkeypatch, capsys):
+        from io import StringIO
+
+        from core.config import settings
+        from formatforge.__main__ import build_parser, cmd_translate
+
+        monkeypatch.setattr(settings, "FF_MAX_BYTES", 10)
+        monkeypatch.setattr(sys, "stdin", StringIO("x" * 11))
+        args = build_parser().parse_args(["translate", "--stdin-text", "--format", "text"])
+
+        code = cmd_translate(args)
+        payload = json.loads(capsys.readouterr().out.strip())
+
+        assert payload["ok"] is False
+        assert payload["error"]["kind"] == "bad_request"
+        assert code == 7
+
     def test_txt_file_conversion(self):
         target = FIXTURES / "gbk_chinese.txt"
         if not target.exists():
