@@ -194,3 +194,89 @@ class TestOutputGuardUnit:
         monkeypatch.setenv("FF_OUTPUT_ROOT", str(declared))
         target = declared / "nested" / "result.md"
         assert resolve_output_path(target) == target.resolve()
+
+
+class TestOutputFileExtensionAllowlist:
+    """T1-8/audit: `--output-file` 只允许写出本产品产出的四种格式。
+
+    这是 CWD 被当作受保护根之外的**第二道锁**：即使输出根配置正确，也不允许把
+    任意后缀的文件写进那里——尤其是 `.py`/`.pth` 这类可被 Python 导入的名字。
+    """
+
+    def _root(self, tmp_path, monkeypatch):
+        """一个位于代码与导入路径之外的、已声明的输出根。"""
+        declared = tmp_path / "declared"
+        monkeypatch.setenv("FF_OUTPUT_ROOT", str(declared))
+        return declared
+
+    @pytest.mark.parametrize("suffix", [".md", ".html", ".json", ".txt"])
+    def test_allowed_output_formats_pass(self, tmp_path, monkeypatch, suffix):
+        from formatforge.output_guard import resolve_output_file
+
+        declared = self._root(tmp_path, monkeypatch)
+        target = declared / f"result{suffix}"
+        assert resolve_output_file(target) == target.resolve()
+
+    @pytest.mark.parametrize("suffix", [".py", ".pyw", ".pyd", ".so", ".pth", ".exe", ".bat", ".ps1"])
+    def test_importable_and_executable_suffixes_are_denied(self, tmp_path, monkeypatch, suffix):
+        from formatforge.output_guard import OutputPathError, resolve_output_file
+
+        declared = self._root(tmp_path, monkeypatch)
+        with pytest.raises(OutputPathError, match="扩展名"):
+            resolve_output_file(declared / f"payload{suffix}")
+
+    def test_denied_even_though_the_root_itself_is_permitted(self, tmp_path, monkeypatch):
+        """关键用例：路径完全在允许根内、且不触及受保护路径——仅因后缀被拒。"""
+        from formatforge.output_guard import OutputPathError, allowed_output_roots, resolve_output_file
+
+        declared = self._root(tmp_path, monkeypatch)
+        assert declared.resolve() in allowed_output_roots()
+        with pytest.raises(OutputPathError, match="扩展名"):
+            resolve_output_file(declared / "sneaky.py")
+
+    def test_extensionless_target_is_denied(self, tmp_path, monkeypatch):
+        from formatforge.output_guard import OutputPathError, resolve_output_file
+
+        declared = self._root(tmp_path, monkeypatch)
+        with pytest.raises(OutputPathError, match="扩展名"):
+            resolve_output_file(declared / "noext")
+
+    def test_uppercase_suffix_is_accepted(self, tmp_path, monkeypatch):
+        """Windows 语义：`.MD` 与 `.md` 是同一后缀。"""
+        from formatforge.output_guard import resolve_output_file
+
+        declared = self._root(tmp_path, monkeypatch)
+        target = declared / "REPORT.MD"
+        assert resolve_output_file(target) == target.resolve()
+
+    def test_error_message_names_the_allowed_formats(self, tmp_path, monkeypatch):
+        from formatforge.output_guard import OutputPathError, resolve_output_file
+
+        declared = self._root(tmp_path, monkeypatch)
+        with pytest.raises(OutputPathError) as exc:
+            resolve_output_file(declared / "x.py")
+        msg = str(exc.value)
+        for suffix in (".md", ".html", ".json", ".txt"):
+            assert suffix in msg, f"报错未列出允许的 {suffix}"
+
+    def test_directory_entry_point_is_not_extension_restricted(self, tmp_path, monkeypatch):
+        """`ff_batch --out` 传的是**目录**，不能受这条规则影响。"""
+        from formatforge.output_guard import resolve_output_path
+
+        declared = self._root(tmp_path, monkeypatch)
+        out_dir = declared / "batch-output"
+        assert resolve_output_path(out_dir, label="--out") == out_dir.resolve()
+
+    def test_cli_rejects_disallowed_suffix(self, tmp_path, monkeypatch, capsys):
+        """端到端：协议层报 bad_request，且**不落盘**。"""
+        declared = self._root(tmp_path, monkeypatch)
+        src = _make_source(tmp_path)
+        target = declared / "evil.py"
+
+        rc = main(["translate", str(src), "--format", "markdown", "--output-file", str(target)])
+        payload = _payload(capsys.readouterr())
+
+        assert rc != 0
+        assert payload["ok"] is False
+        assert payload["error"]["kind"] == "bad_request"
+        assert not target.exists(), "被拒的目标不得被创建"

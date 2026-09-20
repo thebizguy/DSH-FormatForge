@@ -293,10 +293,11 @@ def cmd_translate(args: argparse.Namespace) -> int:
     # 收敛到用户显式声明的 FF_OUTPUT_ROOT；代码/导入路径始终受保护，越界报 bad_request。
     output_file = getattr(args, "output_file", None)
     if output_file:
-        from formatforge.output_guard import OutputPathError, resolve_output_path
+        # T1-8/audit: 文件写入走 resolve_output_file —— 包含性 + 输出扩展名白名单。
+        from formatforge.output_guard import OutputPathError, resolve_output_file
 
         try:
-            out_path = resolve_output_path(output_file, source=source if isinstance(source, Path) else None)
+            out_path = resolve_output_file(output_file, source=source if isinstance(source, Path) else None)
         except OutputPathError as e:
             return _fail("bad_request", str(e), code=ErrorCode.BAD_REQUEST)
         try:

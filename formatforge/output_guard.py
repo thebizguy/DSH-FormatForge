@@ -7,7 +7,8 @@
   1. `FF_OUTPUT_ROOT` 环境变量（可多个，用 `os.pathsep` 分隔）是唯一授权来源；
   2. 未声明时 fail closed，不再把 CLI 进程 CWD 当作隐式授权；
   3. 源文件目录只描述输入，不能扩大输出边界；
-  4. 仓库根和任何 Python 导入路径始终是只读保护区，即使配置误把它们包含在内。
+  4. 仓库根和任何 Python 导入路径始终是只读保护区，即使配置误把它们包含在内；
+  5. **文件写入另行限定输出扩展名白名单**（`resolve_output_file`）——见下方说明。
 
 越界即抛 `OutputPathError`，由调用方转成 `bad_request` 协议错误——不再
 「静默警告 + ok:true」。
@@ -18,6 +19,17 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+
+# T1-8/audit: `--output-file` 只允许写出本产品真正产出的四种格式。
+#
+# 用**白名单**而不是「可执行扩展名黑名单」：黑名单永远列不全（`.py` / `.pyw` /
+# `.pyc` / `.pyd` / `.so` / `.pth` / `.dylib`，以及各平台的可执行后缀），而本产品
+# 的输出格式是封闭的四种。白名单在越界防护之上再堵死「往 sys.path 目录里丢一个
+# 可被导入的文件」这条路——这正是 CWD 被当作受保护根时仍然值得保留的第二道锁。
+#
+# 注意：`--out`（目录）不走这条规则，它由 `resolve_output_path` 校验包含性即可，
+# 因为批处理写出的文件名后缀来自 `batch.py::ext_map`，本身已被限定在这四种之内。
+_OUTPUT_EXT_ALLOWLIST = frozenset({".md", ".html", ".json", ".txt"})
 
 
 class OutputPathError(ValueError):
@@ -84,3 +96,26 @@ def resolve_output_path(
         f"允许根 = {', '.join(str(r) for r in roots)}。"
         f"如需写入其他位置，请用 FF_OUTPUT_ROOT 声明（多个用 '{os.pathsep}' 分隔）。"
     )
+
+
+def resolve_output_file(
+    target: str | Path,
+    *,
+    source: Path | None = None,
+    label: str = "--output-file",
+) -> Path:
+    """**文件**写入的完整校验：包含性 + 输出扩展名白名单。
+
+    凡是把内容写成单个文件的调用点都必须走这里，而不是 `resolve_output_path`。
+    后者面向目录（`ff_batch --out`），不施加扩展名限制。
+    """
+    resolved = resolve_output_path(target, source=source, label=label)
+    suffix = resolved.suffix.lower()
+    if suffix not in _OUTPUT_EXT_ALLOWLIST:
+        allowed = "、".join(sorted(_OUTPUT_EXT_ALLOWLIST))
+        raise OutputPathError(
+            f"{label} 扩展名不被允许：{resolved.name!r}（后缀 {suffix or '（无）'}）。"
+            f"只允许写出本产品的输出格式：{allowed}。"
+            f"需要其他后缀时请改用 `--out` 目录（批处理）或另行转换该文件。"
+        )
+    return resolved
