@@ -15,8 +15,14 @@ import { inboxDir } from '../services/inbox-watcher.mjs'
 import { smartTruncate } from './_truncate.mjs'
 
 const DEFAULT_MAX_CHARS = 12_000
-/** 小产物整段解析的上限；更大的产物只读首尾（协议里 meta 排在 content 之后） */
+/** 小产物整段解析的上限；更大的产物改用流式扫描（不把正文读进内存） */
 const SMALL_ARTIFACT_BYTES = 64 * 1024
+/** 大产物流式扫描的块大小（同一块 Buffer 复用，内存占用与产物大小无关） */
+const SCAN_CHUNK_BYTES = 64 * 1024
+/** meta 对象的收集上限——超过就当它不是协议 meta，绝不无界缓冲 */
+const META_CAPTURE_BYTES = 64 * 1024
+/** 键 token 的收集上限（协议键都是短名；超长字符串一律不当键看） */
+const KEY_TOKEN_BYTES = 64
 
 /** v0.13.0: 截断逻辑已抽到 _truncate.mjs 共用；smartTruncate 由该模块导入（与 core/utils.py::smart_truncate 镜像） */
 
@@ -36,37 +42,201 @@ function readArtifactMeta(full, size) {
     const meta = data.meta || {}
     return { valid: doc?.ok === true && typeof data.content === 'string' && !!meta.result_id, meta, enhance: data.enhance || null }
   }
-  // 大产物：不把整份正文读进内存——首 64B 判 ok，尾 4KB 取 meta 字段
-  let head = ''
-  let tail = ''
+  // 大产物：流式扫描到 data.meta 为止，只把 meta 对象本身读进内存。
+  // （旧实现读尾部 4KB 猜 meta —— 协议键序是 content → format → meta →
+  //   structured_data → quality → enhance，meta 排第三：正文一大、meta 就离尾部很远，
+  //   structured_data/quality 一超过 4KB 尾窗里就没有 result_id，真产物会被判成伪造。）
+  const scanned = scanEnvelopeHead(full)
+  if (!scanned) return null
+  const meta = scanned.meta || {}
+  return {
+    valid: scanned.ok === true && scanned.contentIsString === true && !!meta.result_id,
+    meta,
+    enhance: null,
+  }
+}
+
+/**
+ * 顺序扫描产物直到 `data.meta` 闭合，返回 {ok, contentIsString, meta}；读不动返回 null。
+ *
+ * 为什么不是「找 "meta" 子串」：正文里可以出现任何字节，只有带引号/转义状态的
+ * 结构化扫描才能区分「键」和「正文里的同名文本」。为什么不是整段 JSON.parse：
+ * 产物可以到上百 MB，list 会对收件箱里每一份都做这件事。
+ *
+ * 内存边界：一块复用的 64KB 读缓冲 + ≤64B 的键 token + ≤64KB 的 meta 收集区。
+ * 与产物大小无关；代价是顺序 I/O（meta 之前的正文必须读过去，但不驻留）。
+ * 停止条件不预设键序：`ok`/`content`/`meta` 三项齐了就停，否则一路扫到 `data` 闭合。
+ */
+function scanEnvelopeHead(full) {
+  let fd
   try {
-    const fd = openSync(full, 'r')
-    try {
-      const hb = Buffer.alloc(64)
-      head = hb.subarray(0, readSync(fd, hb, 0, 64, 0)).toString('utf8')
-      const tb = Buffer.alloc(4096)
-      tail = tb.subarray(0, readSync(fd, tb, 0, 4096, Math.max(0, size - 4096))).toString('utf8')
-    } finally {
-      closeSync(fd)
-    }
+    fd = openSync(full, 'r')
   } catch {
     return null
   }
-  const str = (key) => {
-    const m = tail.match(new RegExp(`"${key}"\\s*:\\s*"([^"]*)"`))
-    return m ? m[1] : null
+  const buf = Buffer.alloc(SCAN_CHUNK_BYTES)
+  let filePos = 0
+  let depth = 0
+  let inString = false
+  let trailingBackslashes = 0 // 跨块的连续反斜杠数（判断块首引号是否被转义）
+  const tokenBuf = Buffer.alloc(KEY_TOKEN_BYTES)
+  let tokenLen = 0
+  let tokenOverflow = false
+  let lastToken = null // 最近一个完整的（短）字符串 token
+  const keyAt = [] // keyAt[d] = 第 d 层当前正在赋值的键
+  let okLiteral = null // 读到 `"ok":` 之后收集字面量
+  let ok = false
+  let contentIsString = false
+  let capturing = false
+  let captureBaseDepth = 0
+  let captureStart = -1
+  const captureParts = []
+  let captureLen = 0
+  let meta = null
+  let metaSeen = false
+  let done = false
+
+  const flushCapture = (endExclusive) => {
+    if (!capturing || captureStart < 0) return true
+    const part = Buffer.from(buf.subarray(captureStart, endExclusive))
+    captureLen += part.length
+    if (captureLen > META_CAPTURE_BYTES) {
+      capturing = false // meta 不可能这么大 → 放弃，按「没读到 meta」处理
+      captureStart = -1
+      return false
+    }
+    captureParts.push(part)
+    captureStart = -1
+    return true
   }
-  const num = (key) => {
-    const m = tail.match(new RegExp(`"${key}"\\s*:\\s*(-?[0-9.]+)`))
-    return m ? Number(m[1]) : null
+
+  try {
+    while (!done) {
+      const read = readSync(fd, buf, 0, SCAN_CHUNK_BYTES, filePos)
+      if (read <= 0) break
+      filePos += read
+      if (capturing) captureStart = 0
+      let i = 0
+      while (i < read) {
+        if (inString) {
+          // 跳到下一个未转义的引号；正文字符串在这里被整段跳过（不驻留）
+          let q = buf.indexOf(0x22, i)
+          while (q !== -1) {
+            let bs = 0
+            let k = q - 1
+            while (k >= 0 && buf[k] === 0x5c) {
+              bs++
+              k--
+            }
+            if (k < 0) bs += trailingBackslashes
+            if (bs % 2 === 0) break
+            q = buf.indexOf(0x22, q + 1)
+          }
+          const end = q === -1 ? read : q
+          if (!tokenOverflow) {
+            const room = KEY_TOKEN_BYTES - tokenLen
+            const take = Math.min(room, end - i)
+            buf.copy(tokenBuf, tokenLen, i, i + take)
+            tokenLen += take
+            if (end - i > take) tokenOverflow = true
+          }
+          if (q === -1) {
+            i = read
+            break
+          }
+          lastToken = tokenOverflow ? null : tokenBuf.subarray(0, tokenLen).toString('utf8')
+          inString = false
+          i = q + 1
+          continue
+        }
+        const c = buf[i]
+        if (c === 0x22) {
+          // 字符串开始；`data.content` 必须是字符串（与 fetchOne 的校验对齐）
+          if (depth === 2 && keyAt[1] === 'data' && keyAt[2] === 'content') contentIsString = true
+          inString = true
+          tokenLen = 0
+          tokenOverflow = false
+          i++
+          continue
+        }
+        if (c === 0x7b || c === 0x5b) {
+          if (!capturing && c === 0x7b && depth === 2 && keyAt[1] === 'data' && keyAt[2] === 'meta') {
+            capturing = true
+            captureBaseDepth = depth
+            captureStart = i
+          }
+          depth++
+          keyAt[depth] = null
+          i++
+          continue
+        }
+        if (c === 0x7d || c === 0x5d) {
+          if (okLiteral !== null) {
+            ok = okLiteral === 'true'
+            okLiteral = null
+          }
+          depth--
+          if (capturing && depth === captureBaseDepth) {
+            const okFlush = flushCapture(i + 1)
+            capturing = false
+            metaSeen = true
+            if (okFlush) {
+              try {
+                const parsed = JSON.parse(Buffer.concat(captureParts).toString('utf8'))
+                if (parsed && typeof parsed === 'object') meta = parsed
+              } catch { /* meta 不可解析 → 当没读到 */ }
+            }
+          }
+          i++
+          // 协议键序下 content 在 meta 之前 → 这里就已经问完了，正常产物扫到 meta 即止。
+          // 若 meta 反而排在前面（非协议顺序），继续扫到 data 闭合为止——不重蹈
+          // 「假设键序」的覆辙，代价只是多读一遍（顺序 I/O，内存不变）。
+          if (metaSeen && contentIsString) {
+            done = true
+            break
+          }
+          if (depth === 1 && keyAt[1] === 'data') {
+            done = true
+            break
+          }
+          continue
+        }
+        if (c === 0x3a) {
+          keyAt[depth] = lastToken
+          if (depth === 1 && lastToken === 'ok') okLiteral = ''
+          lastToken = null
+          i++
+          continue
+        }
+        if (c === 0x2c) {
+          if (okLiteral !== null) {
+            ok = okLiteral === 'true'
+            okLiteral = null
+          }
+          keyAt[depth] = null
+          lastToken = null
+          i++
+          continue
+        }
+        if (okLiteral !== null && c > 0x20) okLiteral += String.fromCharCode(c)
+        i++
+      }
+      if (!done) {
+        if (!flushCapture(read)) { /* 超上限：capturing 已关掉 */ }
+        // 块尾的连续反斜杠要带到下一块，否则块首引号的转义状态会判错
+        let bs = 0
+        while (bs < read && buf[read - 1 - bs] === 0x5c) bs++
+        trailingBackslashes = bs === read ? trailingBackslashes + bs : bs
+      }
+    }
+  } catch {
+    return null
+  } finally {
+    try {
+      closeSync(fd)
+    } catch { /* ignore */ }
   }
-  const resultId = str('result_id')
-  return {
-    valid: /"ok"\s*:\s*true/.test(head) && !!resultId,
-    // 协议里 meta 在 content 之后、quality/enhance 之前 → 尾部的首个匹配即 meta 字段
-    meta: { result_id: resultId, parser: str('parser'), confidence: num('confidence'), file_size: num('file_size') },
-    enhance: null,
-  }
+  return { ok, contentIsString, meta }
 }
 
 function listArtifacts() {
