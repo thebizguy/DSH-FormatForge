@@ -75,6 +75,7 @@ version = { attr = "formatforge.__version__.__version__" }
 [tool.pytest.ini_options]
 testpaths = ["test"]
 pythonpath = ["."]
+addopts = "--timeout=180"
 filterwarnings = [
     "ignore::DeprecationWarning:httpx.*:",
 ]
