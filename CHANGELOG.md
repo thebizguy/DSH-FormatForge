@@ -7,6 +7,49 @@
 
 ## [Unreleased]
 
+### 五模型审计整改（2026-09-20；不发布）
+
+> 本轮来自 Opus 5、GPT-5 Codex、GLM-5.3、DeepSeek V4-Pro 和 Qwen 3.7 Max
+> 对当时 54 个修复提交的交叉审计，再经独立复现和分级。以下改动均为本地提交。
+
+- **静默损坏与编码（T1-1、T1-2、T1-6、T1-7）**：Python runner 改为先收集
+  stdout/stderr 字节再一次性按 UTF-8 解码，避免多字节中文跨 pipe chunk 时被替换为
+  U+FFFD；`gb18030` 必须通过结构性回编码验证才能胜出，避免西文静默变成中文乱码；
+  CLI 自身钉死 UTF-8 输入输出。这两项静默损坏对中文优先产品尤其重要：一项会损坏大文档中文，
+  另一项会在无警告时产生 CJK 乱码。T1-6 找到了 24 个长期被标为“环境问题”的失败的
+  根因；Fix-1 后基线为 **726 passed / 0 failed / 12 skipped**，本轮最终为
+  **782 passed / 0 failed / 12 skipped**。回归覆盖 stdout/stderr chunk 边界、cp1252 管道、中西文编码样本。
+- **输出边界（T1-4、T1-5、T1-8）**：`--output-file` 和 `ff_batch --out` 都必须位于显式
+  `FF_OUTPUT_ROOT` 内，仓库、CWD 和 `sys.path` 保护路径默认拒绝写入，且目标后缀只允许
+  `.md/.html/.json/.txt`。批处理在建目录前先验证。父仓库 `start-web.ps1` 通过
+  `bd11e4f` 向受管子进程注入安全输出根，**该配置变更需重启 harness 才生效**。
+  18 个后缀/路径用例与 batch 建目录前拒绝用例覆盖这三项。
+- **内容与批处理完整性（T1-3、T2-1、T2-4、T2-6、T2-7、T2-8、T2-9、T2-10、T3-10、
+  T3-11、T3-12）**：CSV 按最宽行建表且不再截列；DOCX 跟踪插入文本按实际抽取内容分类；PDF
+  页范围在展开前用算术计数限界；diff 报告真实总长度并仅保留靠近变更的边界上下文；
+  batch 哈希命名会检查已占用键，超时清扫不丢已完成 future；策略异常不再伪装成
+  `ok:true`；`_batch_report.json` 成为保留名；WAV 正确跨过奇数 chunk 补位；邮件 base64
+  附件大小改为算术计算。各项都有定向回归；T3-12 锁定了无拷贝代码路径，未单独测量峰值 RSS。
+- **JavaScript 工具与协议边角（T2-2、T2-3、T2-5、T3-1、T3-2、T3-3、T3-4、T3-5）**：
+  多文件 `ff_translate` 拒绝单一 `output_file`；upload Origin 精确绑定实际 GUI 端口；envelope
+  scanner 限制 `ok` token，仅搜索已填充缓冲区，并以 `ok+content+meta` 作停止条件；大产物
+  正确报告 `enhance`；通知/上传清理 U+2028/U+2029；stdout 上限压到 V8 最大字符串以下。
+  JS 回归覆盖大产物、恶意 envelope、Origin、清理和输出上限。T3-2 修复经代码核对正确，
+  但现有 truncated-chunk 用例在修复前也会通过，因此不把该用例计为有效的 fail-before 证据。
+- **CLI 低风险收尾（T3-6、T3-7、T3-8、T3-9、T3-13）**：错误消息现在同时收敛
+  `D:/...`、`D:\...` 和 UNC 路径；stdin 按 UTF-8 字节口径执行 `FF_MAX_BYTES`；目录输入在直接
+  CLI 和 batch 都返回 `is_directory`；`ff_diff` 进程退出码与协议 kind 一致；技能文档将
+  `ff_result.max_chars` 默认值更正为 **12,000**。新增路径、stdin、目录、diff 退出码和
+  报告保留名回归；同文件的其他数字默认值已与实现逐项核对，未发现第二处过期值。
+- **旧轮已知项（K-1 至 K-7）**：inbox 的 `.ff.md/.ff.json` 先写同目录临时文件，按
+  Markdown 在前、JSON 完成标记在后的顺序原子发布；终态 mtime 读取对源文件消失安全；
+  Markdown 表格会转义偶数反斜杠后的管道符；JSON/YAML dict 递归与 XML 一样限制为 50 层；
+  质量报告对超长内容均匀抽样不超过 65,536 字符；batch 续跑根据报告中的字节大小和
+  SHA-256 校验产物；batch 超时改为从命令开始计算的单个墙钟窗口，并用 daemon future
+  避免超时 worker 在解释器退出时被强制 join。每项都有 fail-before/pass-after 回归，包括同大小篡改产物、
+  10 秒挂起 worker 在 3 秒内退出的子进程用例，以及 inbox 端到端用例。
+- **仍未完成（Part B）**：无。
+
 ### 独立复审整改（ZCode/GLM-5.3 第四方复审，2026-09-20；不发布）
 
 > 对 `fix/atria-audit-2026-09` 分支（50 commits / 77 files）做了一次**独立于前三轮**
