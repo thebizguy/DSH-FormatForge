@@ -771,7 +771,7 @@ class TestR12Diff:
         payload, code = run_cli("diff", str(a), str(tmp_path / "missing.txt"))
         assert payload["ok"] is False
         assert payload["error"]["kind"] == "file_not_found"
-        assert code != 0
+        assert code == 2
 
     def test_diff_pdf_support(self, tmp_path):
         """PDF 文件也可 diff（走 translate 中间转换）。"""

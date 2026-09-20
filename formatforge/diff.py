@@ -473,7 +473,18 @@ def _emit_diff(ok: bool, code: int, data: dict, error: dict | None = None) -> in
     emit(payload)
     from formatforge.__main__ import EXIT_OK
 
-    return EXIT_OK if ok else 1
+    if ok:
+        return EXIT_OK
+
+    # T3-9/audit: stdout 协议 code 和进程退出码必须表达同一错误类型。
+    # 与 __main__._fail 一样以 core.errors 为权威，未知 kind 按 internal 收敛。
+    from core.errors import ErrorCode, exit_code_of
+
+    try:
+        error_code = ErrorCode(str((error or {}).get("kind", "internal")))
+    except ValueError:
+        error_code = ErrorCode.INTERNAL
+    return exit_code_of(error_code)
 
 
 def register(sub: argparse._SubParsersAction) -> None:
