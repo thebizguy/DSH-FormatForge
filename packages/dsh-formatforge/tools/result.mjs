@@ -123,11 +123,20 @@ function scanEnvelopeHead(full) {
       if (read <= 0) break
       filePos += read
       if (capturing) captureStart = 0
+      // T3-2/audit：只在**本次真正读进来**的 [0, read) 里找引号。`buf` 是复用的
+      // 64KB 块且不清零：短读（截断产物，或 watcher 非原子写到一半的产物）之后，
+      // [read, 64KB) 还留着上一块的字节。在那里匹配到一个陈旧引号，会让扫描器
+      // 认为字符串已闭合并从一个并不存在的偏移继续 —— 截断产物的正确结论是
+      // 「按读到的字节判」，而不是「按上一块的残留判」。
+      const nextQuote = (from) => {
+        const at = buf.indexOf(0x22, from)
+        return at === -1 || at >= read ? -1 : at
+      }
       let i = 0
       while (i < read) {
         if (inString) {
           // 跳到下一个未转义的引号；正文字符串在这里被整段跳过（不驻留）
-          let q = buf.indexOf(0x22, i)
+          let q = nextQuote(i)
           while (q !== -1) {
             let bs = 0
             let k = q - 1
@@ -137,7 +146,7 @@ function scanEnvelopeHead(full) {
             }
             if (k < 0) bs += trailingBackslashes
             if (bs % 2 === 0) break
-            q = buf.indexOf(0x22, q + 1)
+            q = nextQuote(q + 1)
           }
           const end = q === -1 ? read : q
           if (!tokenOverflow) {
