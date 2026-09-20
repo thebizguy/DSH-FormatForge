@@ -160,6 +160,7 @@ class AudioParser(BaseParser):
                 if len(chunk_header) < 8:
                     break
                 chunk_id, chunk_size = struct.unpack("<4sI", chunk_header)
+                padded_size = chunk_size + (chunk_size & 1)
 
                 if chunk_id == b"fmt ":
                     fmt_data = f.read(min(chunk_size, 64))
@@ -175,15 +176,15 @@ class AudioParser(BaseParser):
                         metadata["bitrate"] = round(byte_rate * 8 / 1000)  # kbps
                         if block_align > 0:
                             metadata["block_align"] = block_align
-                    if chunk_size > 64:
-                        f.seek(chunk_size - len(fmt_data), 1)
+                    if padded_size > len(fmt_data):
+                        f.seek(padded_size - len(fmt_data), 1)
 
                 elif chunk_id == b"data":
                     data_size = chunk_size
                     break
                 else:
-                    if chunk_size > 0:
-                        f.seek(chunk_size, 1)
+                    if padded_size > 0:
+                        f.seek(padded_size, 1)
 
             metadata["data_size"] = data_size
 

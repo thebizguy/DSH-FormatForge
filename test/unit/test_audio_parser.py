@@ -16,10 +16,15 @@ def parser():
     return AudioParser()
 
 
-def _make_wav(sample_rate: int = 44100, channels: int = 2, data_bytes: int = 176400) -> bytes:
+def _make_wav(
+    sample_rate: int = 44100,
+    channels: int = 2,
+    data_bytes: int = 176400,
+    prefix_chunks: bytes = b"",
+) -> bytes:
     """标准 PCM WAV: 44010 帧双声道 → duration ~= 1.0s"""
     fmt = struct.pack("<HHIIHH", 1, channels, sample_rate, sample_rate * channels * 2, channels * 2, 16)
-    chunks = b"fmt " + struct.pack("<I", len(fmt)) + fmt
+    chunks = prefix_chunks + b"fmt " + struct.pack("<I", len(fmt)) + fmt
     chunks += b"data" + struct.pack("<I", data_bytes) + b"\x00" * data_bytes
     return b"RIFF" + struct.pack("<I", 4 + len(chunks)) + b"WAVE" + chunks
 
@@ -51,6 +56,17 @@ class TestH9WavMetadata:
         p.write_bytes(_make_wav())
         meta = parser.parse(p)[0].elements[0].metadata
         assert meta["data_size"] == 176400
+
+    def test_odd_sized_chunk_padding_before_fmt(self, parser, tmp_path):
+        """T3-11: RIFF chunks with odd payloads include one pad byte."""
+        junk = b"JUNK" + struct.pack("<I", 3) + b"abc" + b"\x00"
+        p = tmp_path / "odd-junk.wav"
+        p.write_bytes(_make_wav(prefix_chunks=junk))
+
+        meta = parser.parse(p)[0].elements[0].metadata
+        assert meta.get("sample_rate") == 44100
+        assert meta.get("channels") == 2
+        assert meta.get("data_size") == 176400
 
 
 class TestH8M4aChunkCap:
