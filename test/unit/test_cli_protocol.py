@@ -254,11 +254,14 @@ class TestR10LanguageFlag:
 class TestR10OutputFile:
     """v0.10.0/A9: --output-file 把 content 落盘，stdout 协议不变。"""
 
-    def test_output_file_writes_content(self, tmp_path):
+    def test_output_file_writes_content(self, tmp_path, monkeypatch):
         target = FIXTURES / "gbk_chinese.txt"
         if not target.exists():
             pytest.skip("fixture 缺失")
         out_file = tmp_path / "out.txt"
+        # H11 之后 --output-file 必须落在 output_guard 的允许根内；pytest 的
+        # tmp_path 不在其中，所以这里显式声明它（这正是 FF_OUTPUT_ROOT 的用途）。
+        monkeypatch.setenv("FF_OUTPUT_ROOT", str(tmp_path))
         payload, code = run_cli("translate", str(target), "--format", "text", "--output-file", str(out_file))
         assert payload["ok"] is True
         # stdout 协议不变：content 仍包含转换结果
@@ -308,7 +311,9 @@ class TestR10FormatsCategory:
         import json
         payload = json.loads(proc.stdout)
         assert payload["ok"] is False
-        assert payload["error"]["kind"] == "internal"
+        # FF-M-kinds/audit: 用法错误是 bad_request(7)，不是 internal(70)。
+        # 同文件的 TestArgparseJsonOutput 早已断言新语义；这里是漏改的一处。
+        assert payload["error"]["kind"] == "bad_request"
 
     def test_categories_listed(self):
         payload, _ = run_cli("formats")
@@ -752,7 +757,13 @@ class TestR12Diff:
         target = FIXTURES / "complex_test.pdf"
         if not target.exists():
             pytest.skip("fixture 缺失")
-        payload, code = run_cli("diff", str(target), str(target), "--format", "text")
+        # 「同一文件」现在被显式拒绝（bad_request，无 diff 意义），所以用两份
+        # 内容相同的副本来保留本用例的本意：PDF 能走 diff，且相同内容 0 增 0 删。
+        copy_a = tmp_path / "a.pdf"
+        copy_b = tmp_path / "b.pdf"
+        copy_a.write_bytes(target.read_bytes())
+        copy_b.write_bytes(target.read_bytes())
+        payload, code = run_cli("diff", str(copy_a), str(copy_b), "--format", "text")
         assert payload["ok"] is True
         # 相同文件 → 0 增 0 删
         assert payload["data"]["additions"] == 0
@@ -798,9 +809,9 @@ class TestR14DiffIncremental:
         new_path = tmp_path / "report.txt"
         new_path.write_text("real-new\n", encoding="utf-8")
 
-        # 顺序：path_b path_a + --against-dir
+        # H12 之后位置语义按文档顺序：第一个实参 = path_a（旧版），第二个 = path_b
         payload, code = run_cli(
-            "diff", str(new_path), str(real_old), "--against-dir", str(old_dir)
+            "diff", str(real_old), str(new_path), "--against-dir", str(old_dir)
         )
         assert payload["ok"] is True, payload
         assert payload["data"]["path_a"] == str(real_old)
