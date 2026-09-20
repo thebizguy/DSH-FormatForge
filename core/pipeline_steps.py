@@ -390,10 +390,14 @@ class ConvertStep:
                 ctx.confidence = result.get("confidence", 0.0)
                 ctx.logs.append(create_processing_log("convert", f"转换完成，置信度: {ctx.confidence:.2f}"))
             except Exception as e:
-                ctx.logs.append(create_processing_log("convert", f"转换失败: {e}", "error"))
-                ctx.content = f"转换失败: {e}"
+                error_message = f"转换失败: {e}"
+                ctx.logs.append(create_processing_log("convert", error_message, "error"))
+                ctx.content = error_message
                 ctx.structured_data = None
                 ctx.confidence = 0.0
+                # T2-10: 通过 pipeline 的统一错误通道生成 structuredData.error，
+                # 让 translate 与 batch 入口都把策略异常识别为失败。
+                ctx.error = error_message
         elif ctx.input_data.data and len(ctx.input_data.data) > 0 and not ctx.parsed_file:
             data = ctx.input_data.data
             text = data.decode("utf-8", errors="replace") if isinstance(data, bytes) else str(data)

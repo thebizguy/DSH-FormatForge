@@ -42,6 +42,20 @@ def sample_file(tmp_path):
     return f
 
 
+@pytest.fixture
+def exploding_strategy(monkeypatch):
+    """Force the pipeline through ConvertStep's strategy-exception handler."""
+    from core.pipeline_steps import strategy_registry
+
+    class ExplodingStrategy:
+        strategy_name = "exploding-test-strategy"
+
+        def convert(self, *_args, **_kwargs):
+            raise RuntimeError("strategy boom")
+
+    monkeypatch.setattr(strategy_registry, "select_best_strategy", lambda *_args, **_kwargs: ExplodingStrategy())
+
+
 class TestTranslateFileDataFailureDetection:
     def test_error_result_routes_to_parse_failed(self, error_response, sample_file):
         from formatforge.__main__ import translate_file_data
@@ -85,6 +99,22 @@ class TestCmdTranslateMainFailureDetection:
         from formatforge.__main__ import cmd_translate_main
 
         with pytest.raises(ValueError, match="PDF 解析失败: boom"):
+            cmd_translate_main(sample_file, "text", "auto", 30)
+
+
+class TestStrategyFailureDetection:
+    def test_translate_reports_strategy_exception_as_failure(self, exploding_strategy, sample_file):
+        """T2-10: strategy exceptions must not become ok:true document content."""
+        from formatforge.__main__ import translate_file_data
+
+        data, code = translate_file_data(source=sample_file)
+        assert code == 4
+        assert data == {"kind": "parse_failed", "message": "转换失败: strategy boom"}
+
+    def test_batch_entry_raises_for_strategy_exception(self, exploding_strategy, sample_file):
+        from formatforge.__main__ import cmd_translate_main
+
+        with pytest.raises(ValueError, match="转换失败: strategy boom"):
             cmd_translate_main(sample_file, "text", "auto", 30)
 
 
