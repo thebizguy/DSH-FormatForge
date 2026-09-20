@@ -37,6 +37,8 @@ class DataParser(BaseParser):
     #: FF-M-data/audit: _extract_xml_elements 递归深度上限（dict/list 路径有
     #: [:50] 限量，XML 此前无限深）
     _XML_MAX_DEPTH = 50
+    #: K-4: JSON/YAML dict 递归与 XML 路径使用同一深度上限。
+    _DICT_MAX_DEPTH = _XML_MAX_DEPTH
 
     @property
     def supported_extensions(self) -> list[str]:
@@ -237,8 +239,8 @@ class DataParser(BaseParser):
 
         raise ValueError(f"无法自动检测文件格式: {file_path}")
 
-    def _extract_dict_elements(self, data: dict, prefix: str) -> list[ExtractedElement]:
-        """从字典提取元素"""
+    def _extract_dict_elements(self, data: dict, prefix: str, depth: int = 0) -> list[ExtractedElement]:
+        """从字典提取元素，对嵌套 dict 限深。"""
         elements = []
         for idx, (key, value) in enumerate(data.items()):
             elem_id = f"elem_1_{prefix}_{idx}"
@@ -264,7 +266,21 @@ class DataParser(BaseParser):
 
             # 递归提取嵌套结构
             if isinstance(value, dict):
-                elements.extend(self._extract_dict_elements(value, f"{prefix}_{key}"))
+                if depth >= self._DICT_MAX_DEPTH:
+                    if value:
+                        elements.append(
+                            ExtractedElement(
+                                elementId=f"elem_1_{prefix}_{key}_capped",
+                                elementType="text",
+                                content=(
+                                    f"… 子树超出深度上限 {self._DICT_MAX_DEPTH}，"
+                                    f"已省略 {len(value)} 个直接键"
+                                ),
+                                metadata={"depth": depth, "depth_capped": True},
+                            )
+                        )
+                else:
+                    elements.extend(self._extract_dict_elements(value, f"{prefix}_{key}", depth + 1))
             elif isinstance(value, list):
                 elements.extend(self._extract_list_elements(value, f"{prefix}_{key}"))
 
