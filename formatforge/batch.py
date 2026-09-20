@@ -135,16 +135,22 @@ def _ext_qualified(preferred: Path, target: Path, out_ext: str) -> Path:
     return preferred.with_name(f"{target.stem}.{suffix}{out_ext}" if suffix else f"{target.stem}{out_ext}")
 
 
-def _path_hashed(qualified: Path, target: Path) -> Path:
+def _path_hashed(qualified: Path, target: Path, salt: int = 0) -> Path:
     """碰撞消歧第二级：源路径哈希（同名同扩展名、只是目录不同时用）。
 
     与 JS 侧 case-clash 的 sha1 前 8 位守卫同构。取绝对路径，好让同一份源在
     `--force` 重跑时拿到稳定的产物名（续跑跳过才不会失效）。
+
+    T2-7/audit: `salt` 只在哈希名本身还撞上已占用键时才递增（见
+    `_plan_out_paths`）。salt=0 与加盐前的名字逐字节相同，所以正常批次的产物名
+    和续跑跳过都不受影响。
     """
     try:
         raw = str(target.resolve())
     except OSError:
         raw = str(target)
+    if salt:
+        raw = f"{raw}#{salt}"
     digest = hashlib.sha1(raw.encode("utf-8", "surrogatepass")).hexdigest()[:8]
     return qualified.with_name(f"{qualified.stem}.{digest}{qualified.suffix}")
 
@@ -186,7 +192,15 @@ def _plan_out_paths(
                 taken.add(subkey)
                 continue
             for t in subgroup:
+                # T2-7/audit: 哈希级此前只「加入」taken，从不「检查」taken——与上面
+                # 扩展名级的 `subkey not in taken` 不对称。`<stem>.<ext>.<sha8>.<out>`
+                # 是可预测的名字，所以一个恰好叫 `report.txt.<sha8>.txt` 的源可以占住
+                # 另一个源的哈希名，两行都报 ok 而只有一个产物落盘。冲突时换盐重哈希。
                 hashed = _path_hashed(qualified[t], t)
+                salt = 0
+                while _out_key(hashed) in taken:
+                    salt += 1
+                    hashed = _path_hashed(qualified[t], t, salt)
                 plan[t] = hashed
                 taken.add(_out_key(hashed))
     return plan

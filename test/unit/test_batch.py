@@ -1,12 +1,13 @@
 """EVOLUTION_PLAN N3 —— batch 命令的单元测试（协议契约 + 续跑 + 汇总）。"""
 
+import hashlib
 import json
 import time
 from pathlib import Path
 
 import pytest
 
-from formatforge.batch import cmd_batch
+from formatforge.batch import _out_key, _plan_out_paths, cmd_batch
 
 
 @pytest.fixture()
@@ -281,3 +282,72 @@ class TestReview2OutputKeyCollisions:
             str(out / "sub1" / "same.md"),
             str(out / "sub2" / "same.md"),
         }
+
+
+class TestT27HashedNameCollision:
+    """T2-7/audit: 哈希消歧级此前只往 `taken` 里加、从不检查，守卫不对称。
+
+    `<stem>.<srcext>.<sha8><out_ext>` 是可预测的名字：把一个源命名成另一个源
+    算出来的哈希名，它作为「不碰撞」的单例先占住该键，随后哈希级无视占用直接
+    赋同一个键——两行都报 ok，磁盘上只剩一个产物。
+    """
+
+    def _hashed_name_of(self, src: Path) -> str:
+        """复刻 _path_hashed 的摘要，用来构造故意的碰撞。"""
+        return hashlib.sha1(str(src.resolve()).encode("utf-8", "surrogatepass")).hexdigest()[:8]
+
+    def test_hashed_name_is_checked_against_taken(self, tmp_path):
+        for sub in ("a", "b", "c"):
+            (tmp_path / sub).mkdir()
+        p1 = tmp_path / "a" / "report.txt"
+        p1.write_text("one", encoding="utf-8")
+        p2 = tmp_path / "b" / "report.txt"
+        p2.write_text("two", encoding="utf-8")
+        # p1/p2 同 stem 同扩展名 → 扩展名级也撞 → 走哈希级。
+        # p3 自己不与任何人碰撞，preferred 名正是 p1 的哈希名。
+        p3 = tmp_path / "c" / f"report.txt.{self._hashed_name_of(p1)}.txt"
+        p3.write_text("three", encoding="utf-8")
+
+        plan = _plan_out_paths([p1, p2, p3], None, tmp_path / "out", ".md", False)
+
+        keys = [_out_key(v) for v in plan.values()]
+        assert len(set(keys)) == 3, f"三个源只拿到 {len(set(keys))} 个产物键: {keys}"
+
+    def test_collision_is_resolved_end_to_end(self, tmp_path):
+        """整批跑通：三行都 ok，三个产物都在盘上且内容各不相同。"""
+        for sub in ("a", "b", "c"):
+            (tmp_path / sub).mkdir()
+        p1 = tmp_path / "a" / "report.txt"
+        p1.write_text("body one", encoding="utf-8")
+        (tmp_path / "b" / "report.txt").write_text("body two", encoding="utf-8")
+        p3 = tmp_path / "c" / f"report.txt.{self._hashed_name_of(p1)}.txt"
+        p3.write_text("body three", encoding="utf-8")
+        out = tmp_path / "out"
+
+        code = cmd_batch(_Args(tmp_path / "*" / "*.txt", out))
+
+        report = json.loads((out / "_batch_report.json").read_text(encoding="utf-8"))
+        assert code == 0
+        assert report["total"] == 3
+        assert report["ok_count"] == 3
+        outs = {r["out"] for r in report["results"] if r["ok"]}
+        assert len(outs) == 3, f"两个源写去了同一个产物: {sorted(outs)}"
+        assert all(Path(o).exists() for o in outs)
+        bodies = [Path(o).read_text(encoding="utf-8") for o in outs]
+        for marker in ("body one", "body two", "body three"):
+            assert any(marker in b for b in bodies), f"{marker} 被覆盖了"
+
+    def test_uncontested_hashed_names_are_byte_identical(self, tmp_path):
+        """向后兼容：没有冲突时 salt 不参与，哈希名与加盐前完全一致。"""
+        for sub in ("a", "b"):
+            (tmp_path / sub).mkdir()
+        p1 = tmp_path / "a" / "same.txt"
+        p1.write_text("one", encoding="utf-8")
+        p2 = tmp_path / "b" / "same.txt"
+        p2.write_text("two", encoding="utf-8")
+
+        plan = _plan_out_paths([p1, p2], None, tmp_path / "out", ".md", False)
+
+        assert plan[p1].name == f"same.txt.{self._hashed_name_of(p1)}.md"
+        assert plan[p2].name == f"same.txt.{self._hashed_name_of(p2)}.md"
+
