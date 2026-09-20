@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from core.errors import ErrorCode, exit_code_of
+from formatforge.protocol import emit
 
 logger = logging.getLogger("formatforge.batch")
 
@@ -314,7 +315,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
         (out_dir / "_batch_report.json").write_text(
             json.dumps(empty_report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        print(json.dumps(empty_report, ensure_ascii=False))
+        emit(empty_report)  # T1-6: 统一出口，编码已钉死
         return 1
 
     out_dir = Path(args.out)
@@ -422,5 +423,5 @@ def cmd_batch(args: argparse.Namespace) -> int:
     # 报告落盘（供续跑判断与人工查看），同时 stdout 输出协议 JSON
     report_path = out_dir / "_batch_report.json"
     report_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps(summary, ensure_ascii=False))
+    emit(summary)  # T1-6: 统一出口，编码已钉死
     return 0 if not fail_rows else exit_code_of(ErrorCode.PARSE_FAILED)

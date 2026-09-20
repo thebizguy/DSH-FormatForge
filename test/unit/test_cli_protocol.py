@@ -25,6 +25,11 @@ def run_cli(*args: str, stdin: str | None = None) -> tuple[dict, int]:
         [PY, "-m", "formatforge", *args],
         capture_output=True,
         text=True,
+        # T1-6: 协议两面都是 UTF-8。`text=True` 默认按**跑测机器的 locale** 解码
+        # 子进程输出（本机 cp1252），于是这份契约测试的结果取决于代码页而不是
+        # 被测代码 —— 中文载荷直接 UnicodeDecodeError。显式钉死，与 CLI 现在
+        # 自己钉的编码一致。
+        encoding="utf-8",
         input=stdin,
         cwd=REPO_ROOT,
         timeout=180,
@@ -294,7 +299,7 @@ class TestR10FormatsCategory:
         """argparse choices 校验在 CLI 层拒绝；非 0 退出码 + stderr 信息。"""
         proc = subprocess.run(
             [PY, "-m", "formatforge", "formats", "--category", "no_such_thing"],
-            capture_output=True, text=True, cwd=REPO_ROOT, timeout=30,
+            capture_output=True, text=True, encoding="utf-8", cwd=REPO_ROOT, timeout=30,
             env={**os.environ, "PYTHONPATH": str(REPO_ROOT)},
         )
         assert proc.returncode != 0
@@ -932,3 +937,103 @@ class TestH12DiffDirection:
         data = payload["data"]
         assert data["additions"] == 0
         assert data["deletions"] == 2  # r/s 被删（此前会 report 成 additions=2）
+
+
+class TestT16StdoutEncodingPinned:
+    """T1-6 回归：CLI 必须自己钉死 stdout 的编码。
+
+    协议是 UTF-8 JSON（`ensure_ascii=False`），但 `sys.stdout` 从未被
+    reconfigure。Windows 管道默认走 locale 编码（本机 cp1252），于是任何非
+    ASCII 载荷在**第一行协议 JSON 落地之前**就抛 UnicodeEncodeError，调用方
+    拿到的不是结果而是 internal(70)。JS 侧 python-runner 在 buildChildEnv 里
+    注入 PYTHONIOENCODING/PYTHONUTF8 把它盖住了 —— 所以产品路径看着没事，
+    而直接调用 CLI（以及这里的 capture_output 子进程）全线踩坑。
+
+    这些用例**故意剥掉** PYTHONIOENCODING / PYTHONUTF8，也就是一个普通
+    Windows 控制台或管道的样子。
+    """
+
+    @staticmethod
+    def _env_without_utf8_hints() -> dict[str, str]:
+        env = {k: v for k, v in os.environ.items() if k not in ("PYTHONIOENCODING", "PYTHONUTF8")}
+        env["PYTHONPATH"] = str(REPO_ROOT)
+        return env
+
+    def _run_raw(self, *args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [PY, "-m", "formatforge", *args],
+            capture_output=True,  # bytes：解码方式由断言自己决定，不受跑测机器 locale 影响
+            input=stdin,
+            cwd=REPO_ROOT,
+            timeout=180,
+            env=self._env_without_utf8_hints(),
+        )
+
+    def _assert_protocol_line(self, proc: subprocess.CompletedProcess) -> dict:
+        assert proc.stdout.strip(), (
+            f"stdout 为空：协议 JSON 在写出之前就死了。stderr={proc.stderr[-500:]!r}"
+        )
+        text = proc.stdout.decode("utf-8")  # 协议规定 UTF-8；解不开就是契约破了
+        lines = [line for line in text.splitlines() if line.strip()]
+        payload = json.loads(lines[0])
+        assert isinstance(payload, dict)
+        assert "ok" in payload and "code" in payload
+        return payload
+
+    def test_cjk_conversion_survives_a_cp1252_pipe(self):
+        """非 ASCII 正文 + 无 UTF-8 环境变量 → 仍须返回真正的转换结果。"""
+        target = FIXTURES / "gbk_chinese.txt"
+        if not target.exists():
+            pytest.skip("fixture 缺失")
+
+        proc = self._run_raw("translate", str(target), "--format", "text")
+        payload = self._assert_protocol_line(proc)
+
+        assert payload["ok"] is True, payload
+        assert payload["code"] == 200
+        assert proc.returncode == 0
+        content = payload["data"]["content"]
+        assert "编码测试文件" in content, content[:120]
+
+    def test_stdin_cjk_survives_a_cp1252_pipe(self):
+        proc = self._run_raw("translate", "--stdin-text", "--format", "text",
+                             stdin="中文测试内容，用于验证 stdout 编码。".encode())
+        payload = self._assert_protocol_line(proc)
+        assert payload["ok"] is True, payload
+        assert "中文测试内容" in payload["data"]["content"]
+
+    def test_error_paths_keep_their_own_kind(self):
+        """错误消息是中文。stdout 编码没钉死时，_fail -> _emit 自己先炸，
+        于是每一类错误都塌缩成 internal(70)，调用方再也分不清错误类型。"""
+        proc = self._run_raw("translate", "/no/such/file.docx")
+        payload = self._assert_protocol_line(proc)
+
+        assert payload["ok"] is False
+        assert payload["error"]["kind"] == "file_not_found", payload
+        assert proc.returncode == 2
+
+    def test_emit_never_raises_even_on_an_unpinnable_stream(self):
+        """出口自身的兜底：流不是 UTF-8 且不可 reconfigure 时也必须写出一行。
+
+        `_fail` 走的就是这条路——出口一抛异常，进程就一条协议 JSON 都发不出去。
+        """
+        import io
+
+        from formatforge.protocol import emit
+
+        saved = sys.stdout
+        buffer = io.BytesIO()
+        # cp1252 文本流，且 reconfigure 无法把它变成 UTF-8
+        wrapper = io.TextIOWrapper(buffer, encoding="cp1252", errors="strict", newline="")
+        sys.stdout = wrapper
+        try:
+            emit({"ok": False, "code": 4004, "error": {"kind": "parse_failed", "message": "转换失败：无法解析"}})
+            wrapper.flush()
+            raw = buffer.getvalue()
+        finally:
+            sys.stdout = saved
+            wrapper.detach()  # 别让 wrapper 被回收时连带关掉 buffer
+
+        line = raw.decode("cp1252").strip()
+        payload = json.loads(line)
+        assert payload["error"]["message"] == "转换失败：无法解析"

@@ -17,12 +17,12 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import json
 import logging
 import math
-import sys
 from pathlib import Path
 from typing import Any
+
+from formatforge.protocol import emit
 
 logger = logging.getLogger(__name__)
 
@@ -444,8 +444,8 @@ def _emit_diff(ok: bool, code: int, data: dict, error: dict | None = None) -> in
     payload: dict[str, Any] = {"ok": ok, "code": code, "data": data}
     if error:
         payload["error"] = error
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    # T1-6: 与 __main__._emit 共用同一个出口（编码已钉死、失败也不自爆）
+    emit(payload)
     from formatforge.__main__ import EXIT_OK
 
     return EXIT_OK if ok else 1

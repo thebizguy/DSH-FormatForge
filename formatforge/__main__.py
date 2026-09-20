@@ -60,12 +60,12 @@ def _kind_to_code(kind: str) -> ErrorCode:
 
 from formatforge.batch import cmd_batch  # noqa: E402  (须在 sys.path 注入之后)
 from formatforge.diff import register as register_diff  # noqa: E402  (v0.12.0/B10)
+from formatforge.protocol import emit, pin_std_streams_utf8  # noqa: E402
 
 
 def _emit(payload: dict[str, Any]) -> None:
-    """stdout 唯一出口：单行协议 JSON"""
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    """stdout 唯一出口：单行协议 JSON（编码由 protocol.pin_std_streams_utf8 保证）"""
+    emit(payload)
 
 
 # FF-L-main/audit: 协议 JSON 会把完整本地路径（含用户名目录）和原始异常文本
@@ -547,6 +547,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # T1-6: 任何东西读写标准流之前先钉死编码。协议两面都是 UTF-8，而 Windows 管道
+    # 默认走 locale 编码（cp1252）—— 不钉，非 ASCII 载荷会在第一行 JSON 出去之前
+    # 就 UnicodeEncodeError，调用方只看到 internal(70)。
+    pin_std_streams_utf8()
+
     parser = build_parser()
 
     # v1.0.1: argparse 错误包成协议 JSON 输出（保持 stdout 唯一出口约定）。
