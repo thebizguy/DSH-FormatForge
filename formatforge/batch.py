@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
 import logging
 import re
@@ -112,6 +113,82 @@ def _out_path_for(target: Path, source_dir: Path | None, out_dir: Path, out_ext:
         if rel is not None:
             return out_dir / rel.with_suffix(out_ext)
     return out_dir / f"{target.stem}{out_ext}"
+
+
+def _out_key(path: Path) -> str:
+    """产物键的比较形式。
+
+    统一 casefold：Windows 上 `A.md`/`a.md` 是同一个文件，而 JS 侧（JS-H4）的
+    clash 检测也是小写比较。宁可在 Linux 上把仅大小写不同的一对也当碰撞处理，
+    也不要让同一批任务在不同平台产出不同的文件名。
+    """
+    return str(path).casefold()
+
+
+def _ext_qualified(preferred: Path, target: Path, out_ext: str) -> Path:
+    """碰撞消歧第一级：用源扩展名限定（`report.pdf` → `report.pdf.md`）。
+
+    与 JS 侧 inbox-watcher 的产物键同构（`<源文件名>.ff.json`）。
+    """
+    suffix = target.suffix.lstrip(".")
+    return preferred.with_name(f"{target.stem}.{suffix}{out_ext}" if suffix else f"{target.stem}{out_ext}")
+
+
+def _path_hashed(qualified: Path, target: Path) -> Path:
+    """碰撞消歧第二级：源路径哈希（同名同扩展名、只是目录不同时用）。
+
+    与 JS 侧 case-clash 的 sha1 前 8 位守卫同构。取绝对路径，好让同一份源在
+    `--force` 重跑时拿到稳定的产物名（续跑跳过才不会失效）。
+    """
+    try:
+        raw = str(target.resolve())
+    except OSError:
+        raw = str(target)
+    digest = hashlib.sha1(raw.encode("utf-8", "surrogatepass")).hexdigest()[:8]
+    return qualified.with_name(f"{qualified.stem}.{digest}{qualified.suffix}")
+
+
+def _plan_out_paths(
+    targets: list[Path], source_dir: Path | None, out_dir: Path, out_ext: str, recursive: bool
+) -> dict[Path, Path]:
+    """为整批目标一次性定产物路径，保证产物键两两不同。
+
+    review #2/audit: H4 的消歧只覆盖「目录源 + --recursive」（call site 传的是
+    `source if source.is_dir() else None`），剩下两类还会静默互相覆盖——
+      (a) 跨子目录的 glob（`docs/*/a.pdf`）：sub1/a.pdf 与 sub2/a.pdf 都写 out/a.md；
+      (b) 同目录不同扩展名的同名 stem（report.pdf + report.docx → out/report.md）。
+    两者都是并发写、后写覆盖先写，而且两行都报 ok。
+
+    消歧只发生在**真碰撞**的那一组上（不碰撞的文件名一个字母都不变）：
+    先按扩展名限定，仍撞就再加源路径哈希。
+    """
+    uniq = list(dict.fromkeys(targets))
+    preferred = {t: _out_path_for(t, source_dir, out_dir, out_ext, recursive) for t in uniq}
+    groups: dict[str, list[Path]] = {}
+    for t in uniq:
+        groups.setdefault(_out_key(preferred[t]), []).append(t)
+
+    plan: dict[Path, Path] = {}
+    # 不碰撞的键是「已被占用」的——消歧名不许撞上它们
+    taken = {key for key, group in groups.items() if len(group) == 1}
+    for group in groups.values():
+        if len(group) == 1:
+            plan[group[0]] = preferred[group[0]]
+            continue
+        qualified = {t: _ext_qualified(preferred[t], t, out_ext) for t in group}
+        subgroups: dict[str, list[Path]] = {}
+        for t in group:
+            subgroups.setdefault(_out_key(qualified[t]), []).append(t)
+        for subkey, subgroup in subgroups.items():
+            if len(subgroup) == 1 and subkey not in taken:
+                plan[subgroup[0]] = qualified[subgroup[0]]
+                taken.add(subkey)
+                continue
+            for t in subgroup:
+                hashed = _path_hashed(qualified[t], t)
+                plan[t] = hashed
+                taken.add(_out_key(hashed))
+    return plan
 
 
 def _translate_one(
@@ -249,9 +326,11 @@ def cmd_batch(args: argparse.Namespace) -> int:
     out_ext = ext_map.get(args.format, f".{args.format}")
     pending: list[tuple[Path, Path]] = []
     skipped = 0
+    # H4/audit + review #2: 产物路径在 cmd_batch 统一规划（递归时镜像子目录；
+    # glob/同目录混扩展名的真碰撞按扩展名、必要时再按源路径哈希消歧）
+    planned = _plan_out_paths(targets, source if source.is_dir() else None, out_dir, out_ext, args.recursive)
     for t in targets:
-        # H4/audit: 产物路径在 cmd_batch 统一计算（递归时镜像子目录，避免 stem 碰撞）
-        out_path = _out_path_for(t, source if source.is_dir() else None, out_dir, out_ext, args.recursive)
+        out_path = planned[t]
         if args.force:
             pending.append((t, out_path))
             continue

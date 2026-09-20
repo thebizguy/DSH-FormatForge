@@ -200,3 +200,84 @@ class TestH4Timeout:
         # （真实运行由 JS spawn 的超时兜底，这里只是测试进程的卫生习惯）
         holder = concurrent.futures.ThreadPoolExecutor(max_workers=1)
         holder.shutdown(wait=False)
+
+
+class TestReview2OutputKeyCollisions:
+    """独立评审 #2：H4 的产物键消歧只覆盖「目录源 + --recursive」。
+
+    call site 传的是 `source if source.is_dir() else None`，于是还剩两类碰撞：
+      (a) 跨子目录的 glob（`docs/*/a.txt`）——source.is_dir() 为假 → 全落回
+          flat `<stem><out_ext>`，sub1/a.txt 与 sub2/a.txt 并发写同一个 out/a.md，
+          后写覆盖先写，两行都报 ok（静默丢数据）；
+      (b) 同目录不同扩展名的同名 stem（report.pdf + report.docx）——同样都映射到
+          out/report.md。这里用 .txt/.csv 复刻同一类（合成 fixture，不用二进制样本）。
+    """
+
+    def _report(self, out):
+        return json.loads((out / "_batch_report.json").read_text(encoding="utf-8"))
+
+    def test_glob_across_subdirs_does_not_collide(self, tmp_path):
+        d = tmp_path / "docs"
+        (d / "sub1").mkdir(parents=True)
+        (d / "sub2").mkdir(parents=True)
+        (d / "sub1" / "a.txt").write_text("alpha one", encoding="utf-8")
+        (d / "sub2" / "a.txt").write_text("alpha two", encoding="utf-8")
+        out = tmp_path / "out"
+
+        code = cmd_batch(_Args(d / "*" / "a.txt", out))
+
+        report = self._report(out)
+        assert report["total"] == 2
+        assert report["ok_count"] == 2
+        assert code == 0
+        outs = {r["out"] for r in report["results"] if r["ok"]}
+        assert len(outs) == 2, f"两个同 stem 源写去了同一个产物: {outs}"
+        assert all(Path(o).exists() for o in outs)
+        bodies = [Path(o).read_text(encoding="utf-8") for o in outs]
+        assert any("alpha one" in b for b in bodies)
+        assert any("alpha two" in b for b in bodies)
+
+    def test_same_dir_mixed_extensions_do_not_collide(self, tmp_path):
+        d = tmp_path / "mixed"
+        d.mkdir()
+        (d / "report.txt").write_text("plain report body", encoding="utf-8")
+        (d / "report.csv").write_text("col_a,col_b\n1,2\n", encoding="utf-8")
+        out = tmp_path / "out"
+
+        code = cmd_batch(_Args(d, out))
+
+        report = self._report(out)
+        assert report["total"] == 2
+        assert report["ok_count"] == 2
+        assert code == 0
+        outs = {r["out"] for r in report["results"] if r["ok"]}
+        assert len(outs) == 2, f"report.txt 与 report.csv 写去了同一个产物: {outs}"
+        assert all(Path(o).exists() for o in outs)
+        bodies = [Path(o).read_text(encoding="utf-8") for o in outs]
+        assert any("plain report body" in b for b in bodies)
+        assert any("col_a" in b for b in bodies)
+
+    def test_non_colliding_names_are_unchanged(self, tmp_path, sample_dir):
+        """向后兼容：不碰撞的文件名一个字母都不许变。"""
+        out = tmp_path / "out"
+        cmd_batch(_Args(sample_dir, out))
+        report = self._report(out)
+        assert {Path(r["out"]).name for r in report["results"] if r["ok"]} == {"a.md", "b.md", "c.md"}
+
+    def test_recursive_mirror_layout_is_unchanged(self, tmp_path):
+        """向后兼容：目录 + --recursive 仍然镜像子目录（H4 的既有行为）。"""
+        d = tmp_path / "tree"
+        (d / "sub1").mkdir(parents=True)
+        (d / "sub2").mkdir(parents=True)
+        (d / "sub1" / "same.txt").write_text("one", encoding="utf-8")
+        (d / "sub2" / "same.txt").write_text("two", encoding="utf-8")
+        out = tmp_path / "out"
+
+        cmd_batch(_Args(d, out, recursive=True))
+
+        report = self._report(out)
+        assert report["ok_count"] == 2
+        assert {r["out"] for r in report["results"] if r["ok"]} == {
+            str(out / "sub1" / "same.md"),
+            str(out / "sub2" / "same.md"),
+        }
