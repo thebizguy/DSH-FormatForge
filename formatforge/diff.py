@@ -390,24 +390,38 @@ def _compute_diff(
             truncated = True
         return not truncated
 
-    for tag, i1, i2, j1, j2 in opcodes:
+    last_opcode = len(opcodes) - 1
+    for idx, (tag, i1, i2, j1, j2) in enumerate(opcodes):
         if tag == "equal":
             unchanged += i2 - i1
             # FF-M-diff/audit: 旧实现 `max(i1, i1 - context)` 恒等于 i1、`i2 + context`
             # 恒等于 i2 —— --context 完全无效，全部未变更内容都被吐出来。现在只保留
             # 变更前后各 context 行；中段省略并以显式标记 + elided_lines 报数。
+            #
+            # T2-9/audit: "变更前后各 context 行" 在首尾块上此前并没有真正实现——
+            # 每个 equal 块都吐首尾两端。可首块的**前面**没有变更、尾块的**后面**
+            # 也没有变更，那两端与任何改动都不相邻：白搭进去 context 行无关内容，
+            # 外加一个指向文件开头/结尾的省略标记。按 unified diff 的语义，
+            # 首块只保留尾部、尾块只保留头部，中间块两端都留。
             block = i2 - i1
-            if block <= 2 * context:
+            head_n = 0 if idx == 0 else context
+            tail_n = 0 if idx == last_opcode else context
+            if block <= head_n + tail_n:
                 for ln in lines_a[i1:i2]:
                     _emit_line(" " + ln)
             else:
-                for ln in lines_a[i1 : i1 + context]:
-                    _emit_line(" " + ln)
-                skipped = block - 2 * context
+                if head_n:
+                    for ln in lines_a[i1 : i1 + head_n]:
+                        _emit_line(" " + ln)
+                skipped = block - head_n - tail_n
                 elided += skipped
-                _emit_line(f"... 省略 {skipped} 行未变更内容 ...")
-                if context:
-                    for ln in lines_a[i2 - context : i2]:
+                # 省略标记只在「夹在两处变更之间」的块上才有意义。首尾块省掉的是
+                # 文件开头/结尾那段与改动无关的内容，unified diff 根本不会提它；
+                # 总量仍由 elided_count 如实报出。
+                if idx != 0 and idx != last_opcode:
+                    _emit_line(f"... 省略 {skipped} 行未变更内容 ...")
+                if tail_n:
+                    for ln in lines_a[i2 - tail_n : i2]:
                         _emit_line(" " + ln)
         elif tag == "delete":
             deletions += i2 - i1

@@ -55,13 +55,17 @@ class TestContextClamp:
         d = payload["data"]
         preview = d["diff_preview"]
         ctx = _ctx_lines(preview)
-        # 3 个未变更块，每块最多「变更前后各 1 行」→ 最多 6 行上下文
+        # 2 个未变更块（首块 + 尾块），每块最多「与变更相邻的 1 行」→ 最多 6 行上下文
         # （旧实现在此会吐出全部 39 行未变更内容）
         assert len(ctx) <= 6, f"context 未生效: {ctx}"
         for far in ("line5", "line10", "line15", "line25", "line30", "line35"):
             assert far not in preview, f"远端未变更行仍在 preview: {far}"
         assert d["elided_count"] > 0
-        assert "省略" in preview
+        # T2-9/audit: 这个 fixture 只有一处变更，于是两个 equal 块都是边界块——
+        # 省略掉的是文件开头/结尾那段与改动无关的内容，按 unified diff 的语义不再
+        # 打标记（总量仍在 elided_count 里）。夹在两处变更之间的块仍然会打标记，
+        # 见 TestT29BoundaryContext::test_interior_block_still_keeps_both_ends_and_its_marker。
+        assert "省略" not in preview
         # 统计口径不受裁剪影响
         assert d["unchanged_count"] >= 39
         assert d["additions"] == 1 and d["deletions"] == 1
@@ -321,4 +325,81 @@ class TestT26DiffTotalChars:
         d = payload["data"]
         assert d["diff_total_chars"] >= 0
         assert d["diff_total_chars"] == len(d["diff_preview"])
+
+
+class TestT29BoundaryContext:
+    """T2-9/audit: 首块只留尾部、尾块只留头部，边界上不出现省略标记。
+
+    旧实现对每个 equal 块都吐首尾两端。首块前面没有变更、尾块后面没有变更，
+    那两端与任何改动都不相邻——每份 diff 白白多出最多 2×context 行无关内容，
+    外加两个指向文件开头/结尾的省略标记。
+    """
+
+    def _pair(self, tmp_path: Path, changed_at: int = 50, n: int = 100) -> tuple[Path, Path]:
+        a = tmp_path / "old.txt"
+        b = tmp_path / "new.txt"
+        base = [f"line{i:03d}" for i in range(n)]
+        a.write_text("\n".join(base) + "\n", encoding="utf-8")
+        new = list(base)
+        new[changed_at] = "CHANGED"
+        b.write_text("\n".join(new) + "\n", encoding="utf-8")
+        return a, b
+
+    def test_leading_block_contributes_only_its_tail(self, tmp_path, capsys):
+        a, b = self._pair(tmp_path)
+        payload, rc = _run_diff(capsys, str(a), str(b), "--format", "text", "--context", "3")
+        assert rc == 0, payload
+        preview = payload["data"]["diff_preview"]
+        ctx = _ctx_lines(preview)
+
+        # 首块（line000..line049）只留紧挨变更的三行
+        assert [c.strip() for c in ctx[:3]] == ["line047", "line048", "line049"]
+        for head in ("line000", "line001", "line002"):
+            assert head not in preview, f"首块头部（与变更不相邻）仍被吐出: {head}"
+
+    def test_trailing_block_contributes_only_its_head(self, tmp_path, capsys):
+        a, b = self._pair(tmp_path)
+        payload, rc = _run_diff(capsys, str(a), str(b), "--format", "text", "--context", "3")
+        preview = payload["data"]["diff_preview"]
+        ctx = _ctx_lines(preview)
+
+        # 尾块（line051..line099）只留紧挨变更的三行
+        assert [c.strip() for c in ctx[-3:]] == ["line051", "line052", "line053"]
+        for tail in ("line097", "line098", "line099"):
+            assert tail not in preview, f"尾块尾部（与变更不相邻）仍被吐出: {tail}"
+
+    def test_no_elision_marker_at_either_boundary(self, tmp_path, capsys):
+        a, b = self._pair(tmp_path)
+        payload, _rc = _run_diff(capsys, str(a), str(b), "--format", "text", "--context", "3")
+        d = payload["data"]
+        assert "省略" not in d["diff_preview"], "文件首尾的省略标记与任何变更都不相邻"
+        # 省掉的行数仍然如实统计
+        # 省掉的行数仍然如实统计：未变更总数减去实际吐出来的 6 行上下文
+        assert d["elided_count"] == d["unchanged_count"] - 6
+
+    def test_context_budget_is_halved_at_the_boundaries(self, tmp_path, capsys):
+        """单处变更：上下文行数从 4×context 降到 2×context。"""
+        a, b = self._pair(tmp_path)
+        payload, _rc = _run_diff(capsys, str(a), str(b), "--format", "text", "--context", "3")
+        assert len(_ctx_lines(payload["data"]["diff_preview"])) == 6
+
+    def test_interior_block_still_keeps_both_ends_and_its_marker(self, tmp_path, capsys):
+        """中间块两端都与变更相邻——不许被这次修复误伤。"""
+        a = tmp_path / "old.txt"
+        b = tmp_path / "new.txt"
+        base = [f"line{i:03d}" for i in range(100)]
+        a.write_text("\n".join(base) + "\n", encoding="utf-8")
+        new = list(base)
+        new[10] = "CHANGED-A"
+        new[80] = "CHANGED-B"
+        b.write_text("\n".join(new) + "\n", encoding="utf-8")
+
+        payload, _rc = _run_diff(capsys, str(a), str(b), "--format", "text", "--context", "2", "--max-chars", "200000")
+        preview = payload["data"]["diff_preview"]
+        # 中间块 line011..line079：两端各留 2 行，中段省略并带标记
+        for kept in ("line011", "line012", "line078", "line079"):
+            assert kept in preview, f"中间块两端的上下文丢了: {kept}"
+        assert "line040" not in preview
+        assert "省略" in preview, "夹在两处变更之间的块必须报省略"
+        assert preview.count("省略") == 1
 
