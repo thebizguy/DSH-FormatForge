@@ -307,7 +307,7 @@
 
 ### 测试
 
-- 全部 12 项修复各带针对性回归测试（同 commit）；全套 pytest 589+ 用例与新基线对齐（pre-existing 25 个 subconsole 环境用例不变）。
+- 全部 12 项修复各带针对性回归测试（同 commit）；本轮完成时的历史快照为全套 pytest 589+ 用例与新基线对齐（pre-existing 25 个 subconsole 环境用例不变）。当前带日期的可复现结果请以 README「开发」一节为准（2026-09-20：686 passed / 24 个既有环境相关失败 / 12 skipped）。
 
 ### 不在本轮范围（仍 open）
 
