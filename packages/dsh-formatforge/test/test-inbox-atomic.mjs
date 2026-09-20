@@ -1,7 +1,7 @@
 // K-1: the JSON artifact is the inbox completion marker. Publish it only after
 // both temporary files are complete and the Markdown artifact is in place.
 
-import { writeArtifactPairAtomic } from '../services/inbox-watcher.mjs'
+import { sourceMtimeOr, writeArtifactPairAtomic } from '../services/inbox-watcher.mjs'
 
 let failures = 0
 function check(name, cond, detail = '') {
@@ -57,6 +57,12 @@ try {
 check('publish surfaces a completion-marker failure', threw)
 check('partial publish never exposes JSON as complete', !interrupted.files.has(jsonPath), [...interrupted.files].join(','))
 check('failure cleanup removes both temp files', ![...interrupted.files].some((p) => p.includes('.tmp-')), [...interrupted.files].join(','))
+
+const fallbackMtime = 123456789
+check(
+  'missing sources use the scanned mtime instead of throwing during terminal bookkeeping',
+  sourceMtimeOr('definitely-missing-source.txt', fallbackMtime) === fallbackMtime,
+)
 
 if (failures) {
   console.error(`\n${failures} inbox atomic-write check(s) failed`)

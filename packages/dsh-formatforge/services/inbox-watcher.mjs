@@ -43,6 +43,15 @@ function isSupported(name) {
   return KNOWN_EXT.has(ext)
 }
 
+/** K-2: terminal bookkeeping must not rethrow when the source disappears. */
+export function sourceMtimeOr(path, fallbackMtimeMs = Date.now()) {
+  try {
+    return statSync(path).mtimeMs
+  } catch {
+    return fallbackMtimeMs
+  }
+}
+
 /**
  * K-1: write the pair through same-directory temporary files, then publish the
  * Markdown first and the JSON completion marker last. A crash can therefore
@@ -184,7 +193,7 @@ export function createInboxWatcher({ repoRoot, maxBytes = 100 * 1024 * 1024, tim
       const sig = `${st.size}:${st.mtimeMs}`
       if (prev === sig) {
         pending.delete(name)
-        stable.push({ full, name, size: st.size })
+        stable.push({ full, name, size: st.size, mtimeMs: st.mtimeMs })
       } else {
         pending.set(name, sig)
       }
@@ -194,7 +203,7 @@ export function createInboxWatcher({ repoRoot, maxBytes = 100 * 1024 * 1024, tim
     return stable
   }
 
-  async function processOne({ full, name, size }) {
+  async function processOne({ full, name, size, mtimeMs }) {
     log(`[ff-inbox] converting ${name} (${size}B)`)
     // JS-H4: 产物键含源扩展名（`foo.pdf.ff.json`）——不再让 foo.pdf / foo.docx 互相覆盖
     const { json: jsonPath, md: mdPath, err: errPath } = artifactPaths(name)
@@ -206,7 +215,7 @@ export function createInboxWatcher({ repoRoot, maxBytes = 100 * 1024 * 1024, tim
       // JS-H3: 终态必须记 doneAt —— 此前这是 processOne 里唯一漏记的分支，
       // 于是超限文件每个 tick 都重写错误文件 + 重发通知，永无止境。
       // 语义与成功/失败路径一致：源文件 size/mtime 变了才会重新处理（这是对的）。
-      doneAt.set(name, statSync(full).mtimeMs)
+      doneAt.set(name, sourceMtimeOr(full, mtimeMs))
       onDone?.({ file: name, ok: false, kind: 'too_large', message: msg })
       return
     }
@@ -227,7 +236,7 @@ export function createInboxWatcher({ repoRoot, maxBytes = 100 * 1024 * 1024, tim
       const meta = res.data?.meta || {}
       const enhance = res.data?.enhance && res.data.enhance.needed ? `；enhance=${res.data.enhance.reason}` : ''
       log(`[ff-inbox] done ${name}: parser=${meta.parser}, confidence=${meta.confidence}${enhance}`)
-      doneAt.set(name, statSync(full).mtimeMs)
+      doneAt.set(name, sourceMtimeOr(full, mtimeMs))
       onDone?.({
         file: name,
         ok: true,
@@ -244,7 +253,7 @@ export function createInboxWatcher({ repoRoot, maxBytes = 100 * 1024 * 1024, tim
       const message = res.error?.message || 'unknown error'
       writeFileSync(errPath, `[${kind}] ${message}`)
       log(`[ff-inbox] failed ${name}: ${kind}`)
-      doneAt.set(name, statSync(full).mtimeMs)
+      doneAt.set(name, sourceMtimeOr(full, mtimeMs))
       onDone?.({ file: name, ok: false, kind, message })
     }
   }
