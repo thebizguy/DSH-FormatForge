@@ -16,7 +16,8 @@ when_to_use: |
     quality（附质量报告）、prompt（自定义指令）、pages（PDF 页选择 `1-3,7`）、
     encoding（TXT 类编码覆写如 `gbk`/`latin-1`，**R3.3：自愈重试链路接通了**）、
     **v0.10.0**: language（ISO 639-1 目标语言 metadata，写入 enhance.hint）、
-    **v0.10.0**: output_file（content 另存路径，stdout 协议 JSON 不变）。
+    **v0.10.0**: output_file（content 另存路径，stdout 协议 JSON 不变；**只对单个目标有效**，
+    多文件落盘用 `ff_batch(out=…)`）。
   - `ff_formats` — 列出支持的输入格式。**v0.10.0**: category 过滤（document/data/email/image/archive/audio）。
     **v0.14.0**: 返回 `data.details[]` 含每个 format 的 capabilities 列表（如 `pdf` 有 `[furniture_strip, ocr, table, two_column]`），按能力选择 format。
   - `ff_result` — 收件箱取回。参数：id（单 id）/ ids（批量 `id1,id2,...`，**R3.2 ≤20**）/
