@@ -47,28 +47,32 @@ function readArtifactMeta(full, size) {
     const meta = data.meta || {}
     return { valid: doc?.ok === true && typeof data.content === 'string' && !!meta.result_id, meta, enhance: data.enhance || null }
   }
-  // 大产物：流式扫描到 data.meta 为止，只把 meta 对象本身读进内存。
+  // 大产物：流式扫描，只把 meta / enhance 这两个小对象本身读进内存。
   // （旧实现读尾部 4KB 猜 meta —— 协议键序是 content → format → meta →
   //   structured_data → quality → enhance，meta 排第三：正文一大、meta 就离尾部很远，
   //   structured_data/quality 一超过 4KB 尾窗里就没有 result_id，真产物会被判成伪造。）
+  // T3-1：enhance 此前在这里被硬编码成 null —— 于是 `ff_result list` 对**任何**
+  // > 64KB 的产物都不显示 `⚠enhance=…`，偏偏最需要增强的就是这些大文档。
+  // null 在渲染层读作「不需要增强」，而不是「不知道」，所以这是会误导模型的缺省。
   const scanned = scanEnvelopeHead(full)
   if (!scanned) return null
   const meta = scanned.meta || {}
   return {
     valid: scanned.ok === true && scanned.contentIsString === true && !!meta.result_id,
     meta,
-    enhance: null,
+    enhance: scanned.enhance || null,
   }
 }
 
 /**
- * 顺序扫描产物直到 `data.meta` 闭合，返回 {ok, contentIsString, meta}；读不动返回 null。
+ * 顺序扫描产物，返回 {ok, contentIsString, meta, enhance}；读不动返回 null。
  *
  * 为什么不是「找 "meta" 子串」：正文里可以出现任何字节，只有带引号/转义状态的
  * 结构化扫描才能区分「键」和「正文里的同名文本」。为什么不是整段 JSON.parse：
  * 产物可以到上百 MB，list 会对收件箱里每一份都做这件事。
  *
- * 内存边界：一块复用的 64KB 读缓冲 + ≤64B 的键 token + ≤64KB 的 meta 收集区。
+ * 内存边界：一块复用的 64KB 读缓冲 + ≤64B 的键 token + ≤8B 的 ok 字面量 +
+ * ≤64KB 的对象收集区（meta / enhance 复用同一块，两者不会同时在收）。
  * 与产物大小无关；代价是顺序 I/O（meta 之前的正文必须读过去，但不驻留）。
  * 停止条件不预设键序：`ok`/`content`/`meta` 三项齐了就停；不齐就一路扫到信封闭合
  * （T3-3：旧代码只看 `meta`+`content`，`ok` 不在停止条件里，而兜底又停在 `data` 闭合
@@ -97,28 +101,38 @@ function scanEnvelopeHead(full) {
   let okSeen = false // 顶层 `ok` 的值是否真的读到过（T3-3：停止条件要求它）
   let contentIsString = false
   let capturing = false
+  let captureTarget = null // 'meta' | 'enhance'：当前正在收集的是哪个对象
+  let captureOverflow = false
   let captureBaseDepth = 0
   let captureStart = -1
-  const captureParts = []
+  let captureParts = []
   let captureLen = 0
   let meta = null
   let metaSeen = false
+  let enhance = null // T3-1：与 meta 同一套机制收集（两者不会同时在收）
+  let enhanceSeen = false
   let done = false
   /** T2-5：`ok` 字面量越界 —— 信封不是协议产物（或已损坏），整份判为读不动 */
   let malformed = false
 
   const flushCapture = (endExclusive) => {
-    if (!capturing || captureStart < 0) return true
+    if (!capturing || captureStart < 0) return
+    if (captureOverflow) {
+      captureStart = -1
+      return
+    }
     const part = Buffer.from(buf.subarray(captureStart, endExclusive))
+    captureStart = -1
     captureLen += part.length
     if (captureLen > META_CAPTURE_BYTES) {
-      capturing = false // meta 不可能这么大 → 放弃，按「没读到 meta」处理
-      captureStart = -1
-      return false
+      // 协议的 meta/enhance 不可能这么大 → 停止收集（内存边界优先），但**继续跟到
+      // 闭合**：这样 enhance 才能如实报成 unknown，而不是退回 null（= 不需要增强）。
+      captureOverflow = true
+      captureParts = []
+      captureLen = 0
+      return
     }
     captureParts.push(part)
-    captureStart = -1
-    return true
   }
 
   try {
@@ -180,10 +194,17 @@ function scanEnvelopeHead(full) {
           continue
         }
         if (c === 0x7b || c === 0x5b) {
-          if (!capturing && c === 0x7b && depth === 2 && keyAt[1] === 'data' && keyAt[2] === 'meta') {
-            capturing = true
-            captureBaseDepth = depth
-            captureStart = i
+          if (!capturing && c === 0x7b && depth === 2 && keyAt[1] === 'data') {
+            if (keyAt[2] === 'meta' && !metaSeen) captureTarget = 'meta'
+            else if (keyAt[2] === 'enhance' && !enhanceSeen) captureTarget = 'enhance'
+            if (captureTarget) {
+              capturing = true
+              captureOverflow = false
+              captureBaseDepth = depth
+              captureStart = i
+              captureParts = []
+              captureLen = 0
+            }
           }
           depth++
           keyAt[depth] = null
@@ -198,15 +219,28 @@ function scanEnvelopeHead(full) {
           }
           depth--
           if (capturing && depth === captureBaseDepth) {
-            const okFlush = flushCapture(i + 1)
-            capturing = false
-            metaSeen = true
-            if (okFlush) {
+            flushCapture(i + 1)
+            let parsed = null
+            if (!captureOverflow) {
               try {
-                const parsed = JSON.parse(Buffer.concat(captureParts).toString('utf8'))
-                if (parsed && typeof parsed === 'object') meta = parsed
-              } catch { /* meta 不可解析 → 当没读到 */ }
+                const value = JSON.parse(Buffer.concat(captureParts).toString('utf8'))
+                if (value && typeof value === 'object') parsed = value
+              } catch { /* 不可解析 → 当没读到 */ }
             }
+            if (captureTarget === 'meta') {
+              metaSeen = true
+              meta = parsed
+            } else {
+              enhanceSeen = true
+              // T3-1：读到了 enhance 却收不进内存边界 → 如实报 unknown。
+              // 退回 null 会被渲染成「没有增强提示」，那是把「不知道」说成「不需要」。
+              enhance = parsed || (captureOverflow ? { reason: 'unknown' } : null)
+            }
+            capturing = false
+            captureTarget = null
+            captureOverflow = false
+            captureParts = []
+            captureLen = 0
           }
           i++
           // 协议键序（ok → code → data{content → format → meta}）下三项在 meta 闭合时
@@ -216,7 +250,7 @@ function scanEnvelopeHead(full) {
           // 之后，每份大产物都会被判成 `ok:false`（正是这段代码当初要消灭的
           // 「⚠非转换产物」误报）。缺 `ok` 就一路扫到**信封**闭合，代价只是多读一段
           // 顺序 I/O，内存不变。
-          if (okSeen && metaSeen && contentIsString) {
+          if (okSeen && metaSeen && contentIsString && enhanceSeen) {
             done = true
             break
           }
@@ -224,6 +258,8 @@ function scanEnvelopeHead(full) {
             done = true
             break
           }
+          // `data` 闭合 → enhance 不可能再出现（它是 data 的成员），此时 null
+          // 就是「这份产物没有 enhance 块」的准确答案。
           if (depth === 1 && keyAt[1] === 'data' && okSeen) {
             done = true
             break
@@ -262,7 +298,7 @@ function scanEnvelopeHead(full) {
         i++
       }
       if (!done) {
-        if (!flushCapture(read)) { /* 超上限：capturing 已关掉 */ }
+        flushCapture(read)
         // 块尾的连续反斜杠要带到下一块，否则块首引号的转义状态会判错
         let bs = 0
         while (bs < read && buf[read - 1 - bs] === 0x5c) bs++
@@ -278,7 +314,7 @@ function scanEnvelopeHead(full) {
   }
   // T2-5：与小产物快路径一致 —— `JSON.parse` 失败同样返回 null（读不动 ≠ ok:false）
   if (malformed) return null
-  return { ok, contentIsString, meta }
+  return { ok, contentIsString, meta, enhance }
 }
 
 function listArtifacts() {
