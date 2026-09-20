@@ -13,9 +13,10 @@
 //
 // 用法：node packages/dsh-formatforge/test/test-result-large-meta.mjs
 
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { dirname, join } from 'node:path'
-import { writeFileSync, mkdtempSync, rmSync, mkdirSync, existsSync, statSync } from 'node:fs'
+import { writeFileSync, mkdtempSync, rmSync, mkdirSync, existsSync, statSync, openSync, writeSync, closeSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -170,6 +171,78 @@ check(
 const rendered = tool.output.render({}, listed)
 const bigLine = rendered[0].text.split('\n').find((l) => l.includes('sheet.xlsx'))
 check('render: genuine large artifact carries no ⚠ warning', !!bigLine && !bigLine.includes('非转换产物'), String(bigLine))
+
+// ---- T2-5 回归：顶层 `"ok"` 字面量必须有上限 ----
+//
+// 扫描器自述「内存边界与产物大小无关」，但 `okLiteral += String.fromCharCode(c)`
+// 是**唯一**没有上限的缓冲区（KEY_TOKEN_BYTES / META_CAPTURE_BYTES 管住了其余）：
+// 一份 `{"ok":` + 一大片没有 `,`/`}`/`]` 终止的字面量，会被逐字节累积进活着的
+// harness 进程。真产物只会写 `true`/`false`，所以这是损坏/构造专属路径 —— 但
+// M11 信任边界下同机进程能往收件箱放文件，因此可达。
+//
+// 实测放大倍率约 32×（8MB 字面量 → 256MB 堆），所以在**受限堆的子进程**里跑：
+// 修复前是确定性的 OOM（exit 134），修复后毫秒级返回且堆增长 ~0。
+const bombHome = mkdtempSync(join(tmpdir(), 'ff-okbomb-test-'))
+const bombInbox = join(bombHome, 'inbox')
+mkdirSync(bombInbox, { recursive: true })
+process.on('exit', () => rmSync(bombHome, { recursive: true, force: true }))
+
+const BOMB_MB = 8
+{
+  const fd = openSync(join(bombInbox, 'bomb.ff.json'), 'w')
+  writeSync(fd, Buffer.from('{"ok":', 'utf8'))
+  // 'A' —— 非空白（c > 0x20）、非结构字符：旧代码对每个字节都做一次 okLiteral += …
+  const filler = Buffer.alloc(1024 * 1024, 0x41)
+  for (let i = 0; i < BOMB_MB; i++) writeSync(fd, filler)
+  closeSync(fd)
+}
+const childPath = join(bombHome, 'scan-child.mjs')
+const resultUrl = pathToFileURL(join(here, '..', 'tools', 'result.mjs')).href
+writeFileSync(
+  childPath,
+  [
+    `const { createResultTool } = await import(${JSON.stringify(resultUrl)})`,
+    'const before = process.memoryUsage().heapUsed',
+    'const listed = await createResultTool({ log: () => {} }).execute({ list: true })',
+    'const grewMB = Math.round((process.memoryUsage().heapUsed - before) / 1048576)',
+    'const rows = listed.data.items.map((r) => ({ file: r.file, valid: r.valid }))',
+    'console.log(JSON.stringify({ rows, grewMB }))',
+    '',
+  ].join('\n'),
+)
+const bombRun = spawnSync(process.execPath, ['--max-old-space-size=96', childPath], {
+  encoding: 'utf8',
+  env: { ...process.env, FF_HOME: bombHome },
+})
+check(
+  `pathological "ok" literal (${BOMB_MB}MB) survives a 96MB heap cap`,
+  bombRun.status === 0,
+  `status=${bombRun.status} signal=${bombRun.signal} stderr=${String(bombRun.stderr).split('\n').slice(0, 4).join(' | ')}`,
+)
+let bombOut = null
+try {
+  bombOut = JSON.parse(String(bombRun.stdout).trim().split('\n').pop())
+} catch { /* 子进程没活到打印 */ }
+check('pathological "ok" literal: heap growth stays bounded', !!bombOut && bombOut.grewMB <= 16, JSON.stringify(bombOut))
+check(
+  'pathological "ok" literal: never reported as a valid artifact',
+  !!bombOut && !bombOut.rows.some((r) => r.file === 'bomb.ff.json' && r.valid === true),
+  JSON.stringify(bombOut),
+)
+
+// 大小两条路径的判定要一致：同样形状的小产物走 JSON.parse 快路径，读不动 → 不进 list
+writeFileSync(join(inbox, 'small-bomb.ff.json'), `{"ok":${'A'.repeat(1024)}`)
+const listedAfterBomb = await tool.execute({ list: true })
+check(
+  'malformed small artifact is dropped from the listing (fast path)',
+  !listedAfterBomb.data.items.some((it) => it.file === 'small-bomb.ff.json'),
+  JSON.stringify(listedAfterBomb.data.items.map((i) => i.file)),
+)
+check(
+  'the genuine large artifact is still listed alongside it',
+  listedAfterBomb.data.items.some((it) => it.file === 'sheet.xlsx.ff.json' && it.valid === true),
+  JSON.stringify(listedAfterBomb.data.items.map((i) => i.file)),
+)
 
 if (failures > 0) {
   console.error(`\n❌ ${failures} check(s) failed`)

@@ -23,6 +23,11 @@ const SCAN_CHUNK_BYTES = 64 * 1024
 const META_CAPTURE_BYTES = 64 * 1024
 /** 键 token 的收集上限（协议键都是短名；超长字符串一律不当键看） */
 const KEY_TOKEN_BYTES = 64
+/** T2-5/audit：顶层 `"ok"` 字面量的收集上限。协议里它只可能是 `true`/`false`，
+ *  8 字节绰绰有余；这是扫描器里最后一个没有上限的缓冲区，不设限就等于
+ *  「内存边界与产物大小无关」这条自述的反例（`{"ok":` + 100MB 无终止字面量
+ *  能在活着的 harness 进程里缓冲 100MB，实测 8MB 字面量 → 256MB 堆）。 */
+const OK_LITERAL_BYTES = 8
 
 /** v0.13.0: 截断逻辑已抽到 _truncate.mjs 共用；smartTruncate 由该模块导入（与 core/utils.py::smart_truncate 镜像） */
 
@@ -95,6 +100,8 @@ function scanEnvelopeHead(full) {
   let meta = null
   let metaSeen = false
   let done = false
+  /** T2-5：`ok` 字面量越界 —— 信封不是协议产物（或已损坏），整份判为读不动 */
+  let malformed = false
 
   const flushCapture = (endExclusive) => {
     if (!capturing || captureStart < 0) return true
@@ -218,7 +225,17 @@ function scanEnvelopeHead(full) {
           i++
           continue
         }
-        if (okLiteral !== null && c > 0x20) okLiteral += String.fromCharCode(c)
+        if (okLiteral !== null && c > 0x20) {
+          // T2-5：越界就地判非法，绝不继续累积。注意不能「只是停止累积」——
+          // 那样 okLiteral 会停在一个被截断的值上，扫描器等于**猜**出了一个
+          // ok（几乎必然是 false），与真·`ok:false` 信封无法区分。
+          if (okLiteral.length >= OK_LITERAL_BYTES) {
+            malformed = true
+            done = true
+            break
+          }
+          okLiteral += String.fromCharCode(c)
+        }
         i++
       }
       if (!done) {
@@ -236,6 +253,8 @@ function scanEnvelopeHead(full) {
       closeSync(fd)
     } catch { /* ignore */ }
   }
+  // T2-5：与小产物快路径一致 —— `JSON.parse` 失败同样返回 null（读不动 ≠ ok:false）
+  if (malformed) return null
   return { ok, contentIsString, meta }
 }
 
