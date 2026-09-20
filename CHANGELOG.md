@@ -7,6 +7,65 @@
 
 ## [Unreleased]
 
+### 独立复审整改（ZCode/GLM-5.3 第四方复审，2026-09-20；不发布）
+
+> 对 `fix/atria-audit-2026-09` 分支（50 commits / 77 files）做了一次**独立于前三轮**
+> 的复审（此前分别是 Atria 审计、Codex 文档核对、Claude P4 排查）。复审结论：**无新的
+> 高危缺陷**；3 项 medium，7 项 low。以下为本轮整改项。
+> 复审全文：`D:\Deepseek-harness\zai-independent-review.md`。
+
+- **修复（medium，**本分支自身修复引入的回归**）**：`packages/dsh-formatforge/tools/result.mjs`
+  ——JS-H1b 的 `readArtifactMeta` 对 >64 KB 的产物只读**尾部 4 KB** 并据此正则取
+  `result_id`；但协议键序是 `content → format → meta → structured_data → quality →
+  enhance`，`meta` 排**第三**：正文一大，`meta` 就远离尾部；`structured_data`/`quality`
+  一旦超过 4 KB，尾窗里根本没有 `result_id`。后果有二：①`valid` 被算成 `false`，
+  队列把**真产物**标成 `⚠非转换产物（伪造/损坏，取回会被拒）`；②`notify` 对外宣告的
+  `result_id` 无法取回（回退扫描对 `rid` 为空的条目直接 `continue`），返回
+  **`file_not_found`（4002）**。而 `fetchOne` 的整段解析校验本会**接受**同一份产物——
+  只有 list/notify 路径判错，这正说明它是 bug 而非设计。
+  改为 **`scanEnvelopeHead()` 顺序流式扫描**，扫到 `data.meta` 闭合即止：内存上界为
+  一块复用的 64 KB 读缓冲 + ≤64 B 键 token + ≤64 KB meta 收集区，**与产物大小无关**。
+  刻意不采用两种偷懒做法并已在代码注释中说明理由：**不是**找 `"meta"` 子串（正文可含
+  任意字节，含字面量 `"meta"`，只有带引号/转义状态的结构化扫描才能区分键与正文），
+  **也不是**整段 `JSON.parse`（产物可达上百 MB，而 list 要对收件箱每一份都做一次）。
+  停止条件不预设键序：`ok`/`content`/`meta` 三项齐了即停，否则扫到 `data` 闭合。
+- **修复（medium）**：`formatforge/batch.py` ——H4 的输出键防碰撞只覆盖「目录源 +
+  `--recursive`」（调用点传 `source if source.is_dir() else None`），另两类仍会**静默
+  互相覆盖**：①glob 跨子目录（`ff_batch "docs/*/a.pdf"`）——`source.is_dir()` 为假，
+  全部落到扁平 `<stem><ext>`，`sub1/a.pdf` 与 `sub2/a.pdf` 同写 `out/a.md`，并发下
+  **后写者胜且两者都报 ok**；②同目录不同扩展名同 stem（`report.pdf` + `report.docx`
+  → 同写 `out/report.md`）。现改为**整批一次性规划产物路径**（`_plan_out_paths`）保证
+  两两不同，消歧两级：先按**源扩展名**限定（`report.pdf` → `report.pdf.md`，与 JS 侧
+  `inbox-watcher` 的 `<源文件名>.ff.json` 同构），仍冲突再用**源绝对路径的 sha1 前 8 位**
+  （与 JS 侧 case-clash 守卫同构；取绝对路径是为了 `--force` 重跑拿到稳定名，
+  续跑跳过才不失效）。键比较统一 `casefold`（Windows 上 `A.md`/`a.md` 同文件，且与 JS
+  侧小写比较一致）。**未采用**「glob 锚点镜像子目录」方案：任意 glob 无良定义的公共锚点
+  （跨盘符、`..`），且会让 `out/` 下长出多余目录树。已测锁定：非碰撞用例与
+  「目录 + `--recursive`」镜像布局的产物名**保持不变**。
+- **修复（打包）**：`pyproject.toml` ——`addopts = "--timeout=180"` 依赖
+  **`pytest-timeout`**，但 `[project.optional-dependencies].dev` 从未声明它（只有
+  pytest / pytest-asyncio / ruff / mypy）。全新环境执行
+  `pip install -e ".[dev]"` + `pytest` 会在**收集任何测试之前**以
+  `unrecognized arguments: --timeout=180` 中止；本机之所以正常，只是因为 `.venv-fg`
+  恰好装了 `pytest-timeout 2.4.0`。**这会影响任何克隆该公开仓库的人**。现补声明
+  `pytest-timeout>=2.3`，并新增 `test/unit/test_pytest_configuration.py` 同时锁定契约
+  两侧（`addopts` 仍含 `--timeout`；`dev` 仍声明 `pytest-timeout`）——任一侧被移除即失败。
+- **测试**：新增 4 项。`test/unit/test_pytest_configuration.py`（打包契约守卫）；
+  `test/unit/test_batch.py` 增补 glob 跨子目录与同目录混合扩展名两类碰撞用例，并锁定
+  非碰撞/递归镜像的产物名不变；`packages/dsh-formatforge/test/test-result-large-meta.mjs`
+  （14 项断言，含「meta 距 EOF > 4 KB」的 bug 窗口构造、真产物不再误报、按宣告的
+  `result_id` 取回由 4002 变为成功，以及小产物/无 `result_id`/`ok:false`/伪造产物
+  四类负例）。**均已在改前验证失败**（result 用例在改前失败 8 项，含
+  `4002 file_not_found` 与 `⚠非转换产物` 误报原文）。
+- **已知副作用（已披露）**：此前会碰撞的批次在重跑时会产生**新的产物名**且不再跳过，
+  旧名（如 `out/report.md`）会**残留不清理**。
+- **本轮不在范围（仍 open）**：low 7 项——批次超时预算与 JS 侧 120 s kill 的竞态、
+  `be17036` 提交信息标注 `fix(JS-H6)` 但实际实现的是审计 M10（非原子产物写入仍未修）、
+  `--since-mtime` 现会在 baseline 侧较旧时跳过 against-dir 比对、`_extract_dict_elements`
+  递归仍无深度上限、`escape_md_cell` 在尾随反斜杠后仍漏转义管道、
+  `_text_evidence` 对全文逐字符循环（`--type auto` 默认开启质量报告）、
+  `inbox-watcher` 新增一处未加保护的 `statSync`。
+
 ### FF-L-js-lows — harness tools 收尾批次（tools\*.mjs/.ps1，2026-09-19；不发布）
 
 > 实施落点在 `D:\Deepseek-harness\tools\`（本次起该工作区已有本地 git 仓库，
