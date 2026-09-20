@@ -75,7 +75,14 @@ def escape_md_cell(value: Any) -> str:
     text = "" if value is None else str(value)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = text.replace("\n", "<br>")
-    return re.sub(r"(?<!\\)\|", r"\\|", text)
+    # K-3: a pipe is already escaped only after an odd-length backslash run.
+    # With an even run, the backslashes escape each other and the pipe still
+    # splits the Markdown table, so add one backslash to make the run odd.
+    return re.sub(
+        r"(?<!\\)(?:\\\\)*\|",
+        lambda match: match.group(0)[:-1] + r"\|",
+        text,
+    )
 
 
 def render_markdown_table(grid: list[list[str]], title: str | None = None) -> str:

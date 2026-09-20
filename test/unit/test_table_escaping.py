@@ -51,6 +51,11 @@ class TestEscapeMdCell:
     def test_already_escaped_pipe_not_double_escaped(self):
         assert escape_md_cell("a\\|b") == "a\\|b"
 
+    def test_pipe_after_an_even_backslash_run_is_escaped(self):
+        # Two backslashes escape each other in Markdown, so the following pipe
+        # is still structural and needs one more backslash.
+        assert escape_md_cell("a\\\\|b") == "a\\\\\\|b"
+
     def test_none_is_empty(self):
         assert escape_md_cell(None) == ""
 
