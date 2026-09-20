@@ -13,7 +13,7 @@
 
 import { join, basename, extname } from 'node:path'
 import { homedir } from 'node:os'
-import { readdirSync, statSync, existsSync, writeFileSync, unlinkSync, readFileSync, appendFileSync, openSync, readSync, closeSync } from 'node:fs'
+import { readdirSync, statSync, existsSync, writeFileSync, renameSync, unlinkSync, readFileSync, appendFileSync, openSync, readSync, closeSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { runFormatForge } from './python-runner.mjs'
 
@@ -41,6 +41,32 @@ const KNOWN_EXT = new Set([
 function isSupported(name) {
   const ext = extname(name).toLowerCase()
   return KNOWN_EXT.has(ext)
+}
+
+/**
+ * K-1: write the pair through same-directory temporary files, then publish the
+ * Markdown first and the JSON completion marker last. A crash can therefore
+ * leave Markdown ready for a retry, but never a new JSON marker without it.
+ */
+export function writeArtifactPairAtomic(
+  jsonPath,
+  jsonContent,
+  mdPath,
+  mdContent,
+  fsOps = { writeFileSync, renameSync, unlinkSync },
+) {
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+  const jsonTmp = `${jsonPath}.tmp-${token}`
+  const mdTmp = `${mdPath}.tmp-${token}`
+  try {
+    fsOps.writeFileSync(jsonTmp, jsonContent, 'utf8')
+    fsOps.writeFileSync(mdTmp, mdContent, 'utf8')
+    fsOps.renameSync(mdTmp, mdPath)
+    fsOps.renameSync(jsonTmp, jsonPath)
+  } finally {
+    try { fsOps.unlinkSync(jsonTmp) } catch { /* already published or absent */ }
+    try { fsOps.unlinkSync(mdTmp) } catch { /* already published or absent */ }
+  }
 }
 
 // ─── 产物键（JS-H4） ───
@@ -196,9 +222,8 @@ export function createInboxWatcher({ repoRoot, maxBytes = 100 * 1024 * 1024, tim
     })
 
     if (res.ok) {
-      writeFileSync(jsonPath, JSON.stringify(res, null, 2))
       const content = String(res.data?.content ?? '')
-      writeFileSync(mdPath, content)
+      writeArtifactPairAtomic(jsonPath, JSON.stringify(res, null, 2), mdPath, content)
       const meta = res.data?.meta || {}
       const enhance = res.data?.enhance && res.data.enhance.needed ? `；enhance=${res.data.enhance.reason}` : ''
       log(`[ff-inbox] done ${name}: parser=${meta.parser}, confidence=${meta.confidence}${enhance}`)
