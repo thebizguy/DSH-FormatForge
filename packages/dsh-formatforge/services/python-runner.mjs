@@ -124,6 +124,41 @@ export function createStdoutCollector(capBytes) {
   }
 }
 
+/**
+ * T1-7: stderr 按字节累积，并只在消费时一次性 UTF-8 解码。
+ *
+ * 保留窗口明确以**字节**为单位：超过 64,000 字节时只保留最后 32,000
+ * 字节，以继续限制错误日志的内存占用。保留点会跳过 UTF-8 continuation
+ * bytes，避免截断本身在日志开头制造 U+FFFD。
+ *
+ * @param {number} highWaterBytes 开始收缩的字节数
+ * @param {number} retainedBytes 收缩后最多保留的字节数
+ */
+export function createStderrCollector(highWaterBytes = 64_000, retainedBytes = 32_000) {
+  /** @type {Buffer[]} */
+  let parts = []
+  let bytes = 0
+  return {
+    /** @param {Buffer|string} chunk */
+    push(chunk) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')
+      parts.push(buf)
+      bytes += buf.length
+      if (bytes <= highWaterBytes) return
+
+      const merged = Buffer.concat(parts, bytes)
+      let start = Math.max(0, merged.length - retainedBytes)
+      while (start < merged.length && (merged[start] & 0xc0) === 0x80) start++
+      const tail = Buffer.from(merged.subarray(start))
+      parts = [tail]
+      bytes = tail.length
+    },
+    get bytes() { return bytes },
+    /** 一次性解码：只有到这里字节流才成为字符串。 */
+    text() { return Buffer.concat(parts, bytes).toString('utf8') },
+  }
+}
+
 let cachedPython = null
 
 function candidateInterpreters(repoRoot) {
@@ -247,7 +282,6 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
       return
     }
 
-    let stderr = ''
     let timedOut = false
     // audit medium：stdout 此前**无上限**累积（stderr 有 64KB 上限而它没有），
     // 异常输出能把活着的 harness 进程 OOM 掉。正常输入（FF_MAX_BYTES 默认 100MB）
@@ -255,6 +289,7 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
     // 夹到 V8 单字符串上限以下（T3-5）。
     const stdoutCap = resolveStdoutCap()
     const stdoutCollector = createStdoutCollector(stdoutCap)
+    const stderrCollector = createStderrCollector()
     let stdoutOverflow = false
 
     const timer = setTimeout(() => {
@@ -271,8 +306,8 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
       }
     })
     child.stderr.on('data', (d) => {
-      stderr += d
-      if (stderr.length > 64_000) stderr = stderr.slice(-32_000)
+      // T1-7: 只收字节，避免每个 pipe chunk 单独解码。
+      stderrCollector.push(d)
     })
 
     // JS-H2: 子进程可能在消费 stdin 前就退出（repoRoot 错 → ModuleNotFoundError、
@@ -303,6 +338,8 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
       }
       // T1-1: 字节收齐后**一次性** UTF-8 解码，chunk 边界不再产生 U+FFFD。
       const stdout = stdoutCollector.text()
+      // T1-7: 所有日志与 JS-H7 summarizeStderr 消费者都只看到解码后的字符串。
+      const stderr = stderrCollector.text()
       const line = stdout.split(/\r?\n/).find((l) => l.trim().startsWith('{'))
       if (!line) {
         log?.(`[dsh-formatforge] no protocol JSON on stdout. exit=${exitCode}. stderr tail: ${stderr.slice(-300)}`)
