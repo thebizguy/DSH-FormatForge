@@ -97,6 +97,20 @@ class TestBatch:
         assert r2["skipped"] == 3
         assert r2["ok_count"] == 0
 
+    def test_resume_reconverts_a_corrupt_newer_artifact(self, tmp_path, sample_dir):
+        _, first, out = _run(tmp_path, sample_dir)
+        assert first["ok_count"] == 3
+        artifact = out / "a.md"
+        original_size = len(artifact.read_bytes())
+        artifact.write_bytes(b"x" * original_size)  # same size: checksum must catch it
+
+        code, resumed, _ = _run(tmp_path, sample_dir)
+
+        assert code == 0
+        assert resumed["ok_count"] == 1
+        assert resumed["skipped"] == 2
+        assert "alpha" in artifact.read_text(encoding="utf-8")
+
     def test_force_reconverts(self, tmp_path, sample_dir):
         _run(tmp_path, sample_dir)
         code, report, _ = _run(tmp_path, sample_dir, force=True)

@@ -126,6 +126,46 @@ def _out_key(path: Path) -> str:
     return str(path).casefold()
 
 
+def _artifact_digest(path: Path) -> tuple[int, str]:
+    """Return the on-disk byte size and SHA-256 digest without loading it whole."""
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            size += len(chunk)
+            digest.update(chunk)
+    return size, digest.hexdigest()
+
+
+def _load_integrity_records(report_path: Path) -> dict[str, dict[str, Any]]:
+    """Load the prior report's artifact manifest; malformed/legacy reports fail closed."""
+    try:
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    for item in payload.get("artifacts", []) if isinstance(payload, dict) else []:
+        if not isinstance(item, dict):
+            continue
+        out = item.get("out")
+        size = item.get("size")
+        sha256 = item.get("sha256")
+        if isinstance(out, str) and isinstance(size, int) and isinstance(sha256, str):
+            records[_out_key(Path(out))] = item
+    return records
+
+
+def _artifact_matches(path: Path, record: dict[str, Any] | None) -> bool:
+    """Verify a resume candidate against its persisted byte-size and digest."""
+    if record is None or not path.is_file():
+        return False
+    try:
+        size, sha256 = _artifact_digest(path)
+    except OSError:
+        return False
+    return size == record.get("size") and sha256 == record.get("sha256")
+
+
 def _ext_qualified(preferred: Path, target: Path, out_ext: str) -> Path:
     """碰撞消歧第一级：用源扩展名限定（`report.pdf` → `report.pdf.md`）。
 
@@ -276,6 +316,7 @@ def _translate_one(
     try:
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(content, encoding="utf-8")
+        artifact_size, artifact_sha256 = _artifact_digest(out_path)
     except Exception as e:
         return {
             "file": str(path),
@@ -284,6 +325,8 @@ def _translate_one(
             "message": f"产物写入失败: {out_path.name}: {e}",
             "elapsed_ms": elapsed,
         }
+    row["artifact_size"] = artifact_size
+    row["artifact_sha256"] = artifact_sha256
     # A3: 把 enhance 透传到结果行（让 batch 报告/产物消费者能感知增强提示）
     if enhance:
         row["enhance"] = enhance
@@ -339,6 +382,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
             "out_dir": str(out_dir),
             "results": [],
             "failures": [],
+            "artifacts": [],
             "message": "没有匹配的可转换文件",
         }
         (out_dir / "_batch_report.json").write_text(
@@ -348,12 +392,15 @@ def cmd_batch(args: argparse.Namespace) -> int:
         return 1
 
     out_dir.mkdir(parents=True, exist_ok=True)
+    report_path = out_dir / "_batch_report.json"
+    previous_integrity = _load_integrity_records(report_path)
     workers = max(1, min(args.workers, 8))
 
     # 续跑：产物比源新 → 跳过（--force 强制重转）
     ext_map = {"markdown": ".md", "html": ".html", "json": ".json", "text": ".txt"}
     out_ext = ext_map.get(args.format, f".{args.format}")
     pending: list[tuple[Path, Path]] = []
+    preserved_artifacts: list[dict[str, Any]] = []
     skipped = 0
     # H4/audit + review #2: 产物路径在 cmd_batch 统一规划（递归时镜像子目录；
     # glob/同目录混扩展名的真碰撞按扩展名、必要时再按源路径哈希消歧）
@@ -364,8 +411,21 @@ def cmd_batch(args: argparse.Namespace) -> int:
             pending.append((t, out_path))
             continue
         existing = out_path
-        if existing.exists() and existing.stat().st_mtime >= t.stat().st_mtime:
+        record = previous_integrity.get(_out_key(existing))
+        if (
+            existing.exists()
+            and existing.stat().st_mtime >= t.stat().st_mtime
+            and _artifact_matches(existing, record)
+        ):
             skipped += 1
+            preserved_artifacts.append(
+                {
+                    "file": str(t),
+                    "out": str(existing),
+                    "size": record["size"],
+                    "sha256": record["sha256"],
+                }
+            )
         else:
             pending.append((t, out_path))
 
@@ -474,6 +534,15 @@ def cmd_batch(args: argparse.Namespace) -> int:
         )
     avg_conf = (sum(r.get("confidence", 0.0) for r in ok_rows) / len(ok_rows)) if ok_rows else 0.0
     elapsed_ms = int((time.time() - started_all) * 1000)
+    artifact_records = preserved_artifacts + [
+        {
+            "file": r["file"],
+            "out": r["out"],
+            "size": r["artifact_size"],
+            "sha256": r["artifact_sha256"],
+        }
+        for r in ok_rows
+    ]
 
     summary = {
         "ok": True,
@@ -488,10 +557,11 @@ def cmd_batch(args: argparse.Namespace) -> int:
         "out_dir": str(out_dir),
         "results": results,
         "failures": [{"file": r["file"], "kind": r["kind"], "message": r["message"]} for r in fail_rows],
+        # K-6: resume 只跳过与上次报告字节大小和 SHA-256 都一致的产物。
+        "artifacts": artifact_records,
     }
 
     # 报告落盘（供续跑判断与人工查看），同时 stdout 输出协议 JSON
-    report_path = out_dir / "_batch_report.json"
     report_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     emit(summary)  # T1-6: 统一出口，编码已钉死
     return 0 if not fail_rows else exit_code_of(ErrorCode.PARSE_FAILED)
