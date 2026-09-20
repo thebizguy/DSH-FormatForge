@@ -10,6 +10,12 @@ import pytest
 from formatforge.batch import _out_key, _plan_out_paths, cmd_batch
 
 
+@pytest.fixture(autouse=True)
+def declared_output_root(tmp_path, monkeypatch):
+    """Batch tests must explicitly authorize their temporary output tree."""
+    monkeypatch.setenv("FF_OUTPUT_ROOT", str(tmp_path))
+
+
 @pytest.fixture()
 def sample_dir(tmp_path):
     """3 个可转换文本文件 + 1 个不支持的扩展名。"""
@@ -40,6 +46,31 @@ def _run(tmp_path, sample_dir, **kw):
     code = cmd_batch(_Args(sample_dir, out, **kw))
     report = json.loads((out / "_batch_report.json").read_text(encoding="utf-8"))
     return code, report, out
+
+
+class TestT15OutputGuard:
+    def test_outside_declared_root_is_rejected_before_mkdir(self, tmp_path, monkeypatch, capsys):
+        source = tmp_path / "source"
+        source.mkdir()
+        (source / "note.txt").write_text("safe input", encoding="utf-8")
+        monkeypatch.setenv("FF_OUTPUT_ROOT", str(tmp_path / "allowed"))
+        outside = tmp_path / "outside" / "nested"
+
+        code = cmd_batch(_Args(source, outside))
+        payload = json.loads(capsys.readouterr().out.strip())
+
+        assert code != 0
+        assert payload["ok"] is False
+        assert payload["error"]["kind"] == "bad_request"
+        assert not outside.exists(), "guard must run before mkdir"
+
+    def test_declared_output_root_is_permitted(self, tmp_path, sample_dir):
+        allowed = tmp_path / "allowed"
+        code = cmd_batch(_Args(sample_dir, allowed))
+
+        assert code == 0
+        assert (allowed / "_batch_report.json").exists()
+        assert (allowed / "a.md").exists()
 
 
 class TestBatch:

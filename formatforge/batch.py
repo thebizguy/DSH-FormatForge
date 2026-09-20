@@ -307,10 +307,23 @@ def cmd_batch(args: argparse.Namespace) -> int:
         )
         return exit_code_of(ErrorCode.FILE_NOT_FOUND)
 
+    from formatforge.output_guard import OutputPathError, resolve_output_path
+
+    try:
+        out_dir = resolve_output_path(args.out, source=source, label="--out")
+    except OutputPathError as e:
+        emit(
+            {
+                "ok": False,
+                "code": 4000 + exit_code_of(ErrorCode.BAD_REQUEST),
+                "error": {"kind": ErrorCode.BAD_REQUEST.value, "message": str(e)},
+            }
+        )
+        return exit_code_of(ErrorCode.BAD_REQUEST)
+
     targets = _collect_targets(source, args.recursive)
     if not targets:
         # 空结果也写报告（测试契约：out/_batch_report.json 必须存在）
-        out_dir = Path(args.out)
         out_dir.mkdir(parents=True, exist_ok=True)
         empty_report = {
             "ok": True,
@@ -332,7 +345,6 @@ def cmd_batch(args: argparse.Namespace) -> int:
         emit(empty_report)  # T1-6: 统一出口，编码已钉死
         return 1
 
-    out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     workers = max(1, min(args.workers, 8))
 

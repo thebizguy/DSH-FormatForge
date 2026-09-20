@@ -325,6 +325,10 @@ class TestR10FormatsCategory:
 class TestR10Batch:
     """v0.10.0/B3: batch 子命令 + --force 重转 + 报告落盘。"""
 
+    @pytest.fixture(autouse=True)
+    def _declare_output_root(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("FF_OUTPUT_ROOT", str(tmp_path))
+
     def test_batch_basic_run(self, tmp_path):
         in_dir = tmp_path / "in"
         out_dir = tmp_path / "out"
