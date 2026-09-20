@@ -90,6 +90,11 @@ failure alongside `integrity ok`, is suspect and must not trigger repair.
 - `origin` is `Tianbuyu-wwx/DSH-FormatForge`.
 - `fork` is `thebizguy/DSH-FormatForge`.
 - Pull request #15 is open from `fix/atria-audit-2026-09` to upstream `main`.
+- **Branch convention (this confuses people — read it):** local work happens on **`main`**, not on a
+  local `fix/atria-audit-2026-09` branch. That name exists only as the *fork-side* PR branch. The two
+  are the same line of history: the PR branch is an ancestor of local `main`, so publishing is a
+  fast-forward — `git push fork main:fix/atria-audit-2026-09`. Do **not** create or switch to a local
+  branch of that name; you would fork the history and have to reconcile it.
 
 Do not push upstream `main`. Use the fork and follow the user's explicit PR
 instructions.
