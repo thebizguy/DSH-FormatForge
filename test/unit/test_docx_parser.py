@@ -106,6 +106,23 @@ class TestTrackedInsertionsInBody:
         # 合并展示但显式标记，便于下游区分未接受的修订
         assert page.elements[0].metadata.get("tracked_insert") is True
 
+    def test_ins_only_heading_uses_extracted_text_for_classification(self, tmp_path):
+        """T2-1: tracked-insertion-only paragraphs must not classify as empty."""
+        path = tmp_path / "ins_heading.docx"
+        doc = Document()
+        para = doc.add_paragraph(style="Heading 1")
+        para._p.append(
+            etree.fromstring(
+                f'<w:ins xmlns:w="{W_NS}" w:id="3" w:author="Alice" w:date="2026-08-28T10:02:00Z">'
+                "<w:r><w:t>仅修订标题</w:t></w:r></w:ins>"
+            )
+        )
+        doc.save(path)
+
+        page = _parse(path)
+        assert page.elements[0].content == "仅修订标题"
+        assert page.elements[0].elementType == "heading"
+
     def test_deleted_text_is_not_in_body(self, tmp_path):
         path = tmp_path / "del.docx"
         doc = Document()

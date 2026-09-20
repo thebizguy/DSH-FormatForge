@@ -74,7 +74,7 @@ class DOCXParser(BaseParser):
                     text = text.strip()
                     if not text:
                         continue
-                    elem_type = self._detect_paragraph_style(para)
+                    elem_type = self._detect_paragraph_style(para, text)
                     metadata: dict[str, object] = {
                         "style": para.style.name if para.style else None,
                         "alignment": str(para.alignment) if para.alignment else None,
@@ -205,9 +205,9 @@ class DOCXParser(BaseParser):
         has_ins = p.find(qn("w:ins")) is not None
         return "".join(parts), has_ins
 
-    def _detect_paragraph_style(self, para: "Paragraph") -> str:
+    def _detect_paragraph_style(self, para: "Paragraph", text: str) -> str:
         """检测段落样式类型"""
-        text = para.text.strip()
+        text = text.strip()
 
         # 空段落
         if not text:
