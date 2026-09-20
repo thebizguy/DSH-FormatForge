@@ -17,9 +17,11 @@ import concurrent.futures
 import hashlib
 import json
 import logging
+import queue
 import re
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, as_completed
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +29,66 @@ from core.errors import ErrorCode, exit_code_of
 from formatforge.protocol import emit
 
 logger = logging.getLogger("formatforge.batch")
+
+
+class _DaemonThreadPool:
+    """Small Future-compatible pool whose running jobs cannot block process exit.
+
+    ThreadPoolExecutor registers every worker for an interpreter-exit join, even
+    after ``shutdown(wait=False)``. That defeats the batch deadline when a parser
+    hangs. These workers are daemon threads and are not registered for that join.
+    """
+
+    def __init__(self, max_workers: int):
+        self._queue: queue.Queue[Any] = queue.Queue()
+        self._lock = threading.Lock()
+        self._shutdown = False
+        self._threads = [
+            threading.Thread(target=self._worker, name=f"formatforge-batch-{idx}", daemon=True)
+            for idx in range(max_workers)
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def _worker(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            future, fn, args, kwargs = item
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn(*args, **kwargs))
+            except BaseException as exc:  # Future must surface worker failures to _record.
+                future.set_exception(exc)
+
+    def submit(self, fn: Any, /, *args: Any, **kwargs: Any) -> Future[Any]:
+        with self._lock:
+            if self._shutdown:
+                raise RuntimeError("cannot schedule new futures after shutdown")
+            future: Future[Any] = Future()
+            self._queue.put((future, fn, args, kwargs))
+            return future
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            if cancel_futures:
+                while True:
+                    try:
+                        item = self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                    if item is not None:
+                        item[0].cancel()
+            for _ in self._threads:
+                self._queue.put(None)
+        if wait:
+            for thread in self._threads:
+                thread.join()
 
 #: 支持的输入扩展名（与 inbox watcher 白名单保持一致；v0.13.0/B2: 移除 .doc）
 KNOWN_EXT = {
@@ -259,6 +321,7 @@ def _translate_one(
     encoding: str | None = None,
     language: str | None = None,
     out_path: Path | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     """转换单个文件，返回结果行。v0.13.0/A3: 透传 quality/encoding/language。
 
@@ -294,6 +357,17 @@ def _translate_one(
             "kind": "parse_failed",
             "message": str(e),
             "elapsed_ms": 0,
+        }
+
+    # K-7: a parser that returns after the batch deadline must not publish a
+    # late artifact after the timeout summary has already been written.
+    if deadline is not None and time.monotonic() >= deadline:
+        return {
+            "file": str(path),
+            "ok": False,
+            "kind": "timeout",
+            "message": f"单文件转换超时（>{timeout_s}s）",
+            "elapsed_ms": int((time.time() - started) * 1000),
         }
 
     elapsed = int((time.time() - started) * 1000)
@@ -337,6 +411,7 @@ def cmd_batch(args: argparse.Namespace) -> int:
     from core.config import settings
 
     started_all = time.time()
+    started_monotonic = time.monotonic()
     source = Path(args.source)
     # 存在性检查：目录直接查；glob 模式用 _collect_targets 判空（Path().glob 不支持绝对模式）
     if not source.exists() and not _collect_targets(source, getattr(args, "recursive", False)):
@@ -435,9 +510,10 @@ def cmd_batch(args: argparse.Namespace) -> int:
     batch_encoding = getattr(args, "encoding", None)
     batch_language = getattr(args, "language", None)
     per_file_timeout = max(1, int(settings.FF_TIMEOUT_S))
+    batch_deadline = started_monotonic + per_file_timeout
     # H4/audit: conv_type 不再取自 targets[0]——把 --type 原值传下去，由 _translate_one
     # 按每个文件的扩展名逐个解析（mixed-extension 目录才能拿到各自正确的输出）
-    pool = ThreadPoolExecutor(max_workers=workers)
+    pool = _DaemonThreadPool(max_workers=workers)
     try:
         futures = {
             pool.submit(
@@ -452,11 +528,14 @@ def cmd_batch(args: argparse.Namespace) -> int:
                 batch_encoding,
                 batch_language,
                 out_path,
+                batch_deadline,
             ): t
             for t, out_path in pending
         }
-        # H4/audit: as_completed 带相对超时——一个 hung 文件不能把整批 wedged 到天荒地老
-        total_budget = per_file_timeout * max(1, len(futures))
+        # K-7: the JS runner kills the whole command at the same configured
+        # timeout, so multiplying by N made this deadline almost unreachable.
+        # Use the remaining time in one wall-clock window from command start.
+        total_budget = max(0.001, batch_deadline - time.monotonic())
         # T2-8/audit: 每个 future 必须恰好产出一行。collected 是「已经记过账」的集合，
         # 超时清扫要靠它区分「完成但没被 as_completed 吐出来」和「真的还在跑」。
         collected: set[Any] = set()

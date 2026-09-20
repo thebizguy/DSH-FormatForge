@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -505,4 +507,48 @@ class TestT28TimeoutSweepAccounting:
         """没有超时时不变式当然也要成立——防止修复只照顾异常分支。"""
         _, report, _ = _run(tmp_path, sample_dir)
         assert report["ok_count"] + report["failed"] + report["skipped"] == report["total"]
+
+
+class TestK7BatchDeadline:
+    def test_timeout_budget_is_one_wall_clock_window(self, tmp_path, monkeypatch):
+        import formatforge.batch as batch_mod
+        from core.config import settings
+
+        observed = []
+
+        def capture_as_completed(fs, timeout=None):
+            observed.append(timeout)
+            yield from list(fs)
+
+        monkeypatch.setattr(batch_mod, "as_completed", capture_as_completed)
+        monkeypatch.setattr(settings, "FF_TIMEOUT_S", 5)
+        source = tmp_path / "deadline"
+        source.mkdir()
+        (source / "a.txt").write_text("a", encoding="utf-8")
+        (source / "b.txt").write_text("b", encoding="utf-8")
+
+        cmd_batch(_Args(source, tmp_path / "out"))
+
+        assert len(observed) == 1
+        assert 0 < observed[0] <= 5, observed
+
+    def test_timed_out_workers_do_not_hold_interpreter_exit_open(self):
+        script = (
+            "import time\n"
+            "from formatforge.batch import _DaemonThreadPool\n"
+            "pool = _DaemonThreadPool(max_workers=1)\n"
+            "pool.submit(time.sleep, 10)\n"
+            "pool.shutdown(wait=False, cancel_futures=True)\n"
+        )
+        started = time.monotonic()
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+
+        assert proc.returncode == 0, proc.stderr
+        assert time.monotonic() - started < 3
 
