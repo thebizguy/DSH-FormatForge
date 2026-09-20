@@ -10,6 +10,7 @@ FF-M-email/audit 回归测试：附件尺寸不再物化整块内容 + 未知字
 """
 
 import base64
+import itertools
 import sys
 from pathlib import Path
 
@@ -46,6 +47,32 @@ class _FakePart:
         return base64.b64decode(self._payload) if self._cte == "base64" else self._payload.encode()
 
 
+class _VirtualBase64(str):
+    """Near-limit str without a near-limit allocation; traps known full-copy operations."""
+
+    def __new__(cls, encoded_length):
+        obj = super().__new__(cls, "A")
+        obj.encoded_length = encoded_length
+        return obj
+
+    def __len__(self):
+        return self.encoded_length
+
+    def __iter__(self):
+        return itertools.repeat("A", self.encoded_length)
+
+    def split(self, *_args, **_kwargs):
+        raise AssertionError("base64 payload must not be split into copies")
+
+    def rstrip(self, *_args, **_kwargs):
+        raise AssertionError("base64 payload must not be copied by rstrip")
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            raise AssertionError("base64 payload must not be sliced")
+        return super().__getitem__(key)
+
+
 class TestAttachmentSize:
     def test_base64_size_without_decoding(self):
         raw = base64.b64encode(b"x" * 3000).decode()
@@ -66,6 +93,15 @@ class TestAttachmentSize:
         size, exact = _attachment_size(_FakePart(raw, "base64"))
         assert size == 1000
         assert exact is True
+
+    def test_near_file_limit_base64_is_capped_without_copying(self):
+        """T3-12: code-path proof only; this does not measure peak RSS."""
+        from core.config import settings
+
+        raw = _VirtualBase64(settings.FF_MAX_BYTES - 1)
+        part = _FakePart(raw, "base64")
+        assert _attachment_size(part) == (ATTACHMENT_SIZE_CAP_BYTES, False)
+        assert part.decode_calls == 0
 
     def test_large_8bit_attachment_reports_lower_bound_only(self):
         part = _FakePart("a" * (ATTACHMENT_SIZE_CAP_BYTES + 10), "8bit")

@@ -18,8 +18,9 @@ logger = logging.getLogger("parsers.email")
 
 #: FF-M-email/audit: 附件尺寸统计的物化上限。旧实现无条件
 #: `len(part.get_payload(decode=True) or b"")`——为了一个数字把任意大小的附件
-#: 完整解码进内存（一封带 2GB 附件的邮件即可拖垮进程）。现在 base64 直接按编码
-#: 长度换算（零解码），其他 CTE 只有不超过该上限才真正解码，超限只报「≥ 上限」。
+#: 完整解码进内存（一封带 2GB 附件的邮件即可拖垮进程）。现在 base64 流式统计
+#: 编码字符（零解码、零整串复制），其他 CTE 只有不超过该上限才真正解码；
+#: 两条路径超限都只报「≥ 上限」。
 ATTACHMENT_SIZE_CAP_BYTES = 8 * 1024 * 1024
 
 
@@ -28,14 +29,21 @@ def _attachment_size(part: Any, cap: int = ATTACHMENT_SIZE_CAP_BYTES) -> tuple[i
     cte = str(part.get("Content-Transfer-Encoding") or "").strip().lower()
     raw = part.get_payload()
     if cte == "base64" and isinstance(raw, str):
-        # base64 的 4 字符 → 3 字节；用 str.split() 去空白（不复制整块解码结果）
-        compact_len = sum(len(chunk) for chunk in raw.split())
-        padding = 0
-        stripped = raw.rstrip()
-        while padding < 2 and stripped.endswith("="):
-            padding += 1
-            stripped = stripped[:-1]
-        return max(0, compact_len // 4 * 3 - padding), True
+        # T3-12: split/rstrip/slice 都会复制接近 FF_MAX_BYTES 的整块字符串。
+        # 单次扫描只保留末两个非空白字符；一旦即使扣除最大 padding 也已超 cap，
+        # 立即返回下限，既不解码也不继续遍历剩余编码载荷。
+        compact_len = 0
+        penultimate = last = ""
+        for char in raw:
+            if char.isspace():
+                continue
+            compact_len += 1
+            penultimate, last = last, char
+            if compact_len // 4 * 3 - 2 > cap:
+                return cap, False
+        padding = int(last == "=") + int(penultimate == "=")
+        size = max(0, compact_len // 4 * 3 - padding)
+        return (cap, False) if size > cap else (size, True)
     if isinstance(raw, str) and len(raw) > cap:
         return cap, False
     try:
