@@ -20,7 +20,7 @@ function check(name, cond, detail = '') {
   }
 }
 
-const { runFormatForge, DEFAULT_MAX_STDOUT_BYTES } = await import('../services/python-runner.mjs')
+const { runFormatForge, DEFAULT_MAX_STDOUT_BYTES, V8_MAX_STRING_LENGTH } = await import('../services/python-runner.mjs')
 const repoRoot = join(import.meta.dirname, '..', '..', '..')
 
 const dir = mkdtempSync(join(tmpdir(), 'ff-stdout-cap-'))
@@ -34,7 +34,10 @@ const run = (extraEnv) => {
 }
 
 console.log('\n=== stdout cap (audit medium) ===\n')
-check('default cap is a bounded, generous size', DEFAULT_MAX_STDOUT_BYTES === 512 * 1024 * 1024, String(DEFAULT_MAX_STDOUT_BYTES))
+// T3-5: 此前这里写死 512MB —— 恰好比 V8 单字符串上限大 24 字节。断言改为
+// 「宽裕但低于 V8 上限」，不再把那个具体的坏值锁进测试。
+check('default cap is a bounded, generous size', DEFAULT_MAX_STDOUT_BYTES >= 128 * 1024 * 1024, String(DEFAULT_MAX_STDOUT_BYTES))
+check('default cap stays under the V8 string ceiling', DEFAULT_MAX_STDOUT_BYTES < V8_MAX_STRING_LENGTH, `${DEFAULT_MAX_STDOUT_BYTES} vs ${V8_MAX_STRING_LENGTH}`)
 
 // 1) 极小上限 → 触发上限并终止子进程，拿到明确错误（而不是 OOM 或挂着不返回）
 process.env.FF_MAX_STDOUT_BYTES = '1000'

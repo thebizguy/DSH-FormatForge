@@ -16,8 +16,32 @@ import { homedir, platform } from 'node:os'
 const IS_WIN = platform() === 'win32'
 
 export const DEFAULT_TIMEOUT_MS = 120_000
-/** stdout 硬上限（审计 medium：此前无上限）；100MB 输入的正常信封远低于此值。 */
-export const DEFAULT_MAX_STDOUT_BYTES = 512 * 1024 * 1024
+
+/**
+ * T3-5: V8 的单个字符串最大长度（64 位平台）= 2^29 - 24 = 536,870,888。
+ * 超过它的字符串化会抛 RangeError: Invalid string length。
+ */
+export const V8_MAX_STRING_LENGTH = 536_870_888
+
+/**
+ * stdout 硬上限（审计 medium：此前无上限）；100MB 输入的正常信封远低于此值。
+ *
+ * T3-5: 此前是 512MB = 536,870,912 —— 比 V8 上限**大 24 字节**。旧的
+ * `stdout += d` 是边收边拼字符串的，所以 ASCII 为主的输出会在上限触发**之前**
+ * 于 'data' 处理器里同步抛 RangeError（emit 里的同步抛出不会路由给 'error'
+ * 监听器）：守卫被它本要防住的崩溃抢了先。取 256MB，稳稳低于 V8 上限。
+ */
+export const DEFAULT_MAX_STDOUT_BYTES = 256 * 1024 * 1024
+
+/**
+ * T3-5: 解析生效的 stdout 上限，并夹到 V8 上限以下。
+ * FF_MAX_STDOUT_BYTES 是外部旋钮，允许它超过 V8 上限就等于把这个缺陷放回来。
+ */
+export function resolveStdoutCap(env = process.env) {
+  const configured = Number(env.FF_MAX_STDOUT_BYTES)
+  const wanted = configured > 0 ? configured : DEFAULT_MAX_STDOUT_BYTES
+  return Math.min(wanted, V8_MAX_STRING_LENGTH)
+}
 const MIN_PYTHON = [3, 10]
 
 // ─── JS-H7: 子进程环境白名单 ───
@@ -227,10 +251,9 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
     let timedOut = false
     // audit medium：stdout 此前**无上限**累积（stderr 有 64KB 上限而它没有），
     // 异常输出能把活着的 harness 进程 OOM 掉。正常输入（FF_MAX_BYTES 默认 100MB）
-    // 不会触及默认 512MB；可用 FF_MAX_STDOUT_BYTES 收紧（测试用）。
-    const stdoutCap = Number(process.env.FF_MAX_STDOUT_BYTES) > 0
-      ? Number(process.env.FF_MAX_STDOUT_BYTES)
-      : DEFAULT_MAX_STDOUT_BYTES
+    // 不会触及默认 256MB；可用 FF_MAX_STDOUT_BYTES 收紧（测试用），但该旋钮会被
+    // 夹到 V8 单字符串上限以下（T3-5）。
+    const stdoutCap = resolveStdoutCap()
     const stdoutCollector = createStdoutCollector(stdoutCap)
     let stdoutOverflow = false
 
