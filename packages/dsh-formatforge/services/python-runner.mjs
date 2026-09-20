@@ -63,6 +63,43 @@ export function summarizeStderr(stderr, max = 300) {
   return summary.length > max ? `${summary.slice(0, max)}…` : summary
 }
 
+/**
+ * T1-1: stdout 必须按**字节**累积、结束时一次性解码。
+ *
+ * 旧实现是 `stdout += d`：每个 Buffer chunk 被**独立**强制转成字符串，跨 chunk
+ * 边界的多字节 UTF-8 序列于是各自解成 U+FFFD。协议 JSON 仍能 parse，内容却已
+ * 静默损坏——这是每一次转换（ff_translate / ff_batch / ff_diff / inbox watcher）
+ * 内容必经的唯一通路，而 watcher 会把损坏文本落盘进 .ff.json/.ff.md。
+ *
+ * 上限仍按**字节**计（chunk.length），与 FF_MAX_BYTES 同一量纲；超限的 chunk
+ * 不再入列，由调用方终止子进程。
+ *
+ * @param {number} capBytes 累积上限（字节）
+ */
+export function createStdoutCollector(capBytes) {
+  /** @type {Buffer[]} */
+  const parts = []
+  let bytes = 0
+  let overflow = false
+  return {
+    /** @param {Buffer|string} chunk @returns {boolean} false = 超限（chunk 被丢弃） */
+    push(chunk) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'utf8')
+      bytes += buf.length
+      if (bytes > capBytes) {
+        overflow = true
+        return false
+      }
+      parts.push(buf)
+      return true
+    },
+    get bytes() { return bytes },
+    get overflow() { return overflow },
+    /** 一次性解码：只有到这里字节流才成为字符串。 */
+    text() { return Buffer.concat(parts).toString('utf8') },
+  }
+}
+
 let cachedPython = null
 
 function candidateInterpreters(repoRoot) {
@@ -186,7 +223,6 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
       return
     }
 
-    let stdout = ''
     let stderr = ''
     let timedOut = false
     // audit medium：stdout 此前**无上限**累积（stderr 有 64KB 上限而它没有），
@@ -195,7 +231,7 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
     const stdoutCap = Number(process.env.FF_MAX_STDOUT_BYTES) > 0
       ? Number(process.env.FF_MAX_STDOUT_BYTES)
       : DEFAULT_MAX_STDOUT_BYTES
-    let stdoutBytes = 0
+    const stdoutCollector = createStdoutCollector(stdoutCap)
     let stdoutOverflow = false
 
     const timer = setTimeout(() => {
@@ -204,15 +240,12 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
     }, timeoutMs)
 
     child.stdout.on('data', (d) => {
-      stdoutBytes += d.length
-      if (stdoutBytes > stdoutCap) {
-        if (!stdoutOverflow) {
-          stdoutOverflow = true
-          killTree(child)
-        }
-        return
+      // T1-1: 只收字节，不在这里拼字符串（见 createStdoutCollector）。
+      if (stdoutCollector.push(d)) return
+      if (!stdoutOverflow) {
+        stdoutOverflow = true
+        killTree(child)
       }
-      stdout += d
     })
     child.stderr.on('data', (d) => {
       stderr += d
@@ -245,6 +278,8 @@ export async function runFormatForge({ cliArgs, repoRoot, stdinText, timeoutMs =
         resolve(fail('output_too_large', `CLI 输出超过上限（>${stdoutCap} 字节），已终止进程；可用 FF_MAX_STDOUT_BYTES 调整`))
         return
       }
+      // T1-1: 字节收齐后**一次性** UTF-8 解码，chunk 边界不再产生 U+FFFD。
+      const stdout = stdoutCollector.text()
       const line = stdout.split(/\r?\n/).find((l) => l.trim().startsWith('{'))
       if (!line) {
         log?.(`[dsh-formatforge] no protocol JSON on stdout. exit=${exitCode}. stderr tail: ${stderr.slice(-300)}`)
