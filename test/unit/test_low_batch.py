@@ -125,6 +125,20 @@ class TestMainLow:
         assert "secret" not in msg
         assert "report.pdf" in msg
 
+    def test_safe_message_relativizes_forward_slash_drive_and_unc_paths(self):
+        from formatforge.__main__ import _safe_message
+
+        drive = _safe_message("读取失败: D:/Users/jared/secret/report.pdf 无法解析")
+        unc = _safe_message(r"读取失败: \\SERVER\share\jared\secret\report.pdf 无法解析")
+
+        assert "report.pdf" in drive
+        assert "jared" not in drive
+        assert "secret" not in drive
+        assert "report.pdf" in unc
+        assert "SERVER" not in unc
+        assert "share" not in unc
+        assert "jared" not in unc
+
     def test_safe_message_truncates(self):
         from formatforge.__main__ import _MAX_MESSAGE_CHARS, _safe_message
 

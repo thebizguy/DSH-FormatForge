@@ -17,7 +17,7 @@ import json
 import logging
 import sys
 import time
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, cast
 
 logger = logging.getLogger(__name__)
@@ -87,10 +87,12 @@ def _safe_message(message: Any, *, _path_token: Path | None = None) -> str:
             text = text.replace(str(_path_token), Path(_path_token).name)
         except Exception:
             pass
-    # 收敛任意形如 X:\...\... 或 /a/b/c 的绝对路径为 basename
+    # 收敛 Windows 盘符路径（两种分隔符）、UNC 路径和 POSIX 绝对路径。
     import re
 
-    text = re.sub(r"[A-Za-z]:\\[^\s\"':;]+", lambda m: Path(m.group(0)).name, text)
+    windows_basename = lambda m: PureWindowsPath(m.group(0)).name  # noqa: E731
+    text = re.sub(r"\\\\[^\\/\s\"':;]+[\\/][^\s\"':;]+", windows_basename, text)
+    text = re.sub(r"[A-Za-z]:[\\/][^\s\"':;]+", windows_basename, text)
     text = re.sub(r"(?<![\w:])/(?:[^\s\"':;/]+/)+([^\s\"':;/]+)", r"\1", text)
     if len(text) > _MAX_MESSAGE_CHARS:
         text = text[:_MAX_MESSAGE_CHARS] + "…(truncated)"
