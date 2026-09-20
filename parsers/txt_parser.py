@@ -23,6 +23,8 @@ _BOM_ENCODINGS: tuple[tuple[bytes, str], ...] = (
 
 # FF-M-txt/audit: 回退链——utf-8 全量严格校验 → gb18030（GBK/GB2312 超集）
 # → latin-1（永不失败，但标记 lossy，不假装是正确解码）。
+# T1-2: 链上的 gb18030 额外要求 _looks_like_gb() 佐证，未通过则让位给 chardet
+# 的单字节猜测（见 _detect_encoding）。
 _FALLBACK_CHAIN: tuple[str, ...] = ("utf-8", "utf-8-sig", "gb18030")
 _LAST_RESORT = "latin-1"
 
@@ -30,6 +32,16 @@ _LAST_RESORT = "latin-1"
 # 对它们的高置信度猜测没有证据价值——例如「ASCII 前缀 + GBK 尾部」的混合文件会被
 # 猜成 ISO-8859-9 / Windows-1252，直接采信就把中文静默解成乱码。
 _NO_EVIDENCE_CHARSET_PREFIXES = ("iso8859", "cp125", "mac-")
+
+# T1-2: gb18030「解得开」并不等于「解得对」。高位字节 + 紧跟的 ASCII 字母正好构成
+# 合法双字节序列，于是整篇 cp1252 西文会被吞成汉字；而 gb18030 是 _is_verified →
+# True 的多字节编码，lossy_decode / encoding_verified 标记根本不会触发 → 静默乱码。
+# 佐证判据：真实 GB2312/GBK 正文的双字节 trail 几乎都落在 0xA1-0xFE（GB2312 区），
+# 西文误判时 trail 恰恰是被吞掉的 ASCII 字母（<0xA1）。实测比例：
+#   德语/西语 cp1252 乱码样本 0.09 / 0.07 ·真实 gbk/gb2312 语料 1.00
+# 阈值取 0.5，两侧各留一个数量级的余量。
+_GB_STRUCTURE_MIN_RATIO = 0.5
+_GB_SAMPLE_BYTES = 32768
 
 # 可选依赖
 try:
@@ -147,8 +159,9 @@ class TXTParser(BaseParser):
         """
         检测文件编码
 
-        顺序：BOM → chardet → 全量严格校验回退链（utf-8 → utf-8-sig →
-        gb18030）→ latin-1（lossy 兜底，由调用方标记）。
+        顺序：BOM → chardet（多字节/有证据价值的判定）→ 全量严格校验回退链
+        （utf-8 → utf-8-sig → 经佐证的 gb18030）→ chardet 的单字节猜测 →
+        latin-1（lossy 兜底，由调用方标记）。
 
         FF-M-txt/audit: 旧实现只在**前 1024 字节**上试 utf-8（合法前缀 + 非法
         尾部会误判为 utf-8 → 静默乱码），且不识别 BOM。
@@ -180,9 +193,17 @@ class TXTParser(BaseParser):
 
         # 回退：对**整个文件**做严格解码校验（分块增量解码，不整文件载入内存）
         for candidate in _FALLBACK_CHAIN:
-            if self._decodes_fully(file_path, candidate):
-                logger.debug("回退链命中编码: %s", candidate)
-                return candidate
+            if not self._decodes_fully(file_path, candidate):
+                continue
+            # T1-2: gb18030 必须先自证。它对大量 cp1252 字节流「解码成功」却输出
+            # 汉字乱码，而且不会触发任何 lossy/未验证标记——在这个位置无条件采信
+            # 它，等于让最坏的一类错误成为最安静的一类。未通过佐证就把裁决权交回
+            # 下面的 chardet 单字节猜测（那是真实的统计证据，不是「永不失败」）。
+            if candidate == "gb18030" and not self._looks_like_gb(file_path):
+                logger.debug("gb18030 可解码但结构不像 GB 正文（疑似西文误判），跳过: %s", file_path)
+                continue
+            logger.debug("回退链命中编码: %s", candidate)
+            return candidate
 
         if chardet_hint:
             logger.warning("严格解码全部失败，采信未验证的 chardet 猜测 %s: %s", chardet_hint, file_path)
@@ -190,6 +211,43 @@ class TXTParser(BaseParser):
 
         logger.warning("所有候选编码均失败，回退 latin-1（结果可能为乱码）: %s", file_path)
         return _LAST_RESORT
+
+    @staticmethod
+    def _looks_like_gb(file_path: Path) -> bool:
+        """gb18030 解码成功后的结构佐证：这些多字节序列真的像 GB 正文吗？
+
+        真实 GB2312/GBK 汉字的 trail 字节几乎都在 0xA1-0xFE；cp1252 西文被
+        gb18030 吞掉时，trail 恰恰是被吞进去的 ASCII 字母（<0xA1）。判定用
+        codec 自身回编每个字符，而不是手写一套 GB18030 状态机。
+
+        GB18030 四字节序列在西文字节流里几乎凑不出来，计入佐证。
+        """
+        try:
+            decoder = codecs.getincrementaldecoder("gb18030")()
+            with open(file_path, "rb") as f:
+                sample = f.read(_GB_SAMPLE_BYTES)
+            # 不传 final=True：样本尾部被截断的半个序列自动挂起，不算错
+            text = decoder.decode(sample)
+        except (OSError, UnicodeDecodeError, LookupError):  # pragma: no cover - 调用前已全量校验
+            return False
+
+        multibyte = 0
+        structured = 0
+        for ch in text:
+            try:
+                raw = ch.encode("gb18030")
+            except UnicodeEncodeError:  # pragma: no cover - 解码所得必可回编
+                continue
+            if len(raw) == 1:
+                continue
+            multibyte += 1
+            if len(raw) >= 4 or raw[1] >= 0xA1:
+                structured += 1
+
+        if multibyte == 0:
+            # 纯 ASCII 样本：gb18030 与 ASCII 等价，无从解错
+            return True
+        return structured / multibyte >= _GB_STRUCTURE_MIN_RATIO
 
     @staticmethod
     def _is_verified(encoding: str) -> bool:

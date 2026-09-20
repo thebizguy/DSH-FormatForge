@@ -96,3 +96,105 @@ class TestLossyFallbackMarker:
         page = TXTParser().parse(path)[0]
         assert page.metadata.get("encoding") == "utf-8"
         assert "lossy_decode" not in page.metadata
+
+
+class TestGb18030MustNotEatWesternText:
+    """T1-2 回归：gb18030 「解得开」不等于「解得对」。
+
+    `_FALLBACK_CHAIN` 里的 gb18030 此前无条件命中：cp1252 西文中「重音字母 +
+    紧跟的 ASCII 字母」正好构成合法 GBK 双字节序列，整篇西文被吞成汉字。而
+    `_is_verified("gb18030")` 为 True，所以 `lossy_decode` /
+    `encoding_verified: False` 一个都不会出现 —— 最坏的一类错误反而最安静。
+    """
+
+    # 每个重音字母后面都紧跟 ASCII 字母（0x40-0x7E 是合法 GBK trail 区），
+    # 因此整个文件都能被 gb18030 「成功」解码。
+    GERMAN = (
+        "Müller und Schäfer besuchten die Königin. Der Bäcker backte "
+        "Wörter in Häuser. Das Fräulein kaufte Möbel. Übung macht "
+        "den Meister, sagte der größere Mann zum Türsteher.\n"
+    )
+    SPANISH = (
+        "El niño pequeño y la niña compraron años de leña. "
+        "La señora Muñoz enseña español con cañas. "
+        "Mañana la compañía diseña un añadido.\n"
+    )
+
+    def _write_cp1252(self, tmp_path, name, text):
+        path = tmp_path / name
+        raw = text.encode("cp1252")
+        path.write_bytes(raw)
+        # 前提校验：这些字节确实能被 gb18030 解开（否则测不到回归点）
+        raw.decode("gb18030")
+        return path
+
+    def test_german_cp1252_is_not_decoded_as_gb18030(self, tmp_path):
+        path = self._write_cp1252(tmp_path, "german.txt", self.GERMAN)
+        parser = TXTParser()
+
+        assert parser._detect_encoding(path) != "gb18030"
+
+        page = parser.parse(path)[0]
+        assert page.metadata["encoding"] != "gb18030"
+        assert "Müller" in page.rawText
+        assert "Königin" in page.rawText
+
+    def test_spanish_cp1252_is_not_decoded_as_gb18030(self, tmp_path):
+        path = self._write_cp1252(tmp_path, "spanish.txt", self.SPANISH)
+        parser = TXTParser()
+
+        assert parser._detect_encoding(path) != "gb18030"
+
+        page = parser.parse(path)[0]
+        assert page.metadata["encoding"] != "gb18030"
+        assert "niño" in page.rawText
+        assert "compañía" in page.rawText
+
+    def test_western_text_round_trips(self, tmp_path):
+        """内容必须真的还原，而不只是换了个编码名。"""
+        parser = TXTParser()
+        for name, text in (("german.txt", self.GERMAN), ("spanish.txt", self.SPANISH)):
+            path = self._write_cp1252(tmp_path, name, text)
+            encoding = parser._detect_encoding(path)
+            decoded = path.read_bytes().decode(encoding, errors="replace")
+            assert decoded == text, f"{name} 未能还原（encoding={encoding}）"
+
+    def test_no_cjk_mojibake_leaks_into_western_output(self, tmp_path):
+        path = self._write_cp1252(tmp_path, "german.txt", self.GERMAN)
+        raw_text = TXTParser().parse(path)[0].rawText
+        assert not any("\u4e00" <= ch <= "\u9fff" for ch in raw_text), raw_text[:120]
+
+
+class TestGenuineGbTextStillWins:
+    """T1-2 不得回退 `3d798ef` 保护的那个场景：真实 GBK 中文仍须判为 GB。"""
+
+    def test_real_gbk_fixture_still_detected_as_gb(self):
+        fixture = Path(__file__).parent.parent / "fixtures" / "gbk_chinese.txt"
+        if not fixture.exists():
+            import pytest
+
+            pytest.skip("fixture 缺失")
+        parser = TXTParser()
+        encoding = parser._detect_encoding(fixture)
+        assert encoding.lower().replace("_", "-") in ("gb18030", "gbk", "gb2312")
+        assert "编码测试文件" in parser.parse(fixture)[0].rawText
+
+    def test_ascii_prefix_plus_gbk_tail_still_detected_as_gb(self, tmp_path):
+        """混合文件（ASCII 前缀 + GBK 正文）——正是上一轮修复要护住的形状。"""
+        path = tmp_path / "ascii_then_gbk.txt"
+        path.write_bytes(("plain ascii line\n" * 100).encode("ascii") + "中文段落，编码为 GBK。".encode("gbk"))
+        parser = TXTParser()
+        assert parser._detect_encoding(path).lower().replace("_", "-") in ("gb18030", "gbk", "gb2312")
+        assert "中文段落" in parser.parse(path)[0].rawText
+
+    def test_gb_structure_corroboration_separates_the_two(self, tmp_path):
+        """佐证判据本身：真实 GB 通过，西文误判不通过。"""
+        parser = TXTParser()
+
+        gb_path = tmp_path / "real_gb.txt"
+        gb_path.write_bytes("中文内容，真实的 GBK 正文段落。".encode("gbk"))
+        assert parser._looks_like_gb(gb_path) is True
+
+        western = tmp_path / "western.txt"
+        western.write_bytes(TestGb18030MustNotEatWesternText.GERMAN.encode("cp1252"))
+        assert parser._looks_like_gb(western) is False
