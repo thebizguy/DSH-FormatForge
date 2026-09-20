@@ -6,6 +6,7 @@ from core.pdf_enhance import (
     detect_furniture,
     is_page_number_line,
     parse_pages_spec,
+    parse_pages_spec_ordered,
     reorder_two_columns,
     strip_furniture,
 )
@@ -36,6 +37,18 @@ class TestParsePagesSpec:
             parse_pages_spec("abc")
         with pytest.raises(ValueError, match="pages 参数"):
             parse_pages_spec("1-")
+
+    def test_pathological_range_rejected_before_materialization(self, monkeypatch):
+        """T2-4: reject an enormous range before either parser calls range()."""
+        import core.pdf_enhance as pdf_enhance
+
+        def forbidden_range(*_args):
+            raise AssertionError("pathological page range was materialized")
+
+        monkeypatch.setattr(pdf_enhance, "range", forbidden_range, raising=False)
+        for parser in (parse_pages_spec, parse_pages_spec_ordered):
+            with pytest.raises(ValueError, match="pages 参数"):
+                parser("1-1000000000")
 
 
 class TestPageNumberLine:

@@ -177,12 +177,6 @@ class PDFParser(BaseParser):
         Yields:
             PageContent: 选中页的内容（在全部解析与全书标注完成后按请求序产出）
         """
-        selected = self._parse_page_selection(pages)
-        selection_order = None
-        if selected:
-            from core.pdf_enhance import parse_pages_spec_ordered
-
-            selection_order = parse_pages_spec_ordered(pages)
         logger.info(
             "开始流式解析 PDF: %s (OCR=%s, backend=%s, pages=%s, furniture=%s)",
             file_path,
@@ -205,10 +199,12 @@ class PDFParser(BaseParser):
                 total_pages = len(pdf.pages)
                 logger.info("PDF 共 %d 页", total_pages)
 
-                # H16/audit: 选择必须先对照真实页数校验——--pages 9999 之前是 0 页
-                # 空文档 + ok:true 假成功
-                if selected and max(selected) > total_pages:
-                    raise ValueError(f"pages 参数格式错误: 请求页 {max(selected)} 超出范围（PDF 共 {total_pages} 页）")
+                # T2-4: PDF 页数已知后先校验端点与选择上限，再展开一次有序列表；
+                # lookup set 只从这个已受限列表构建，攻击者不能控制巨型分配。
+                from core.pdf_enhance import parse_pages_spec_ordered
+
+                selection_order = parse_pages_spec_ordered(pages, max_page=total_pages)
+                selected = set(selection_order) if selection_order else None
 
                 # E2-2: 先扫全书的页首/尾候选行（跨页重复 ≥60% 才判为 furniture）
                 furniture = self._detect_furniture(pdf) if drop_furniture else set()

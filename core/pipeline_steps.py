@@ -209,10 +209,10 @@ class ParseStep:
                 # pages 表达式非法属用户输入错误，先本地校验以便精确报错
                 pdf_options = None
                 if getattr(ctx, "pages", None):
-                    from core.pdf_enhance import parse_pages_spec
+                    from core.pdf_enhance import validate_pages_spec
 
-                    selected_pages = parse_pages_spec(ctx.pages)  # 非法时抛 ValueError
-                    if selected_pages:
+                    # T2-4: 入口只校验端点/选择数量，不在 PDF 页数已知前展开范围。
+                    if validate_pages_spec(ctx.pages):  # 非法时抛 ValueError
                         pdf_options = {"pages": ctx.pages}
                 # R3.3: 自愈重试的编码覆写（TXT 解析器消费；其他解析器忽略）
                 enc = getattr(ctx, "encoding", None)
