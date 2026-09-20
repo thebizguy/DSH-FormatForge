@@ -69,9 +69,11 @@ function originAllowed(req, allowed) {
   return allowed.has(normalizeOrigin(origin))
 }
 
-/** 日志/文件名里的控制字符（含 NUL/CR/LF）：NUL 会让 basename() 直接抛异常。 */
+/** 日志/文件名里的控制字符（含 NUL/CR/LF）：NUL 会让 basename() 直接抛异常。
+ *  T3-4/audit：U+2028/U+2029 同样要剥 —— 它们是合法的 NTFS 文件名字符，不在
+ *  C0/C1 里，却在很多渲染器/分词器里当换行用；文件名会一路进收件箱、进通知文本。 */
 function stripControl(s) {
-  return String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f]/g, '_')
+  return String(s ?? '').replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '_')
 }
 
 const KNOWN_EXT = new Set([

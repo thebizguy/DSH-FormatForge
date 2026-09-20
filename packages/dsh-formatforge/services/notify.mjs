@@ -20,10 +20,16 @@ const MAX_NOTICE_CHARS = 1000
 /**
  * JS-H5: 不可信字段净化——剥离 C0/C1 控制字符（含 CR/LF）、折叠空白、限长。
  * 通知是以 role:'user' 注入**活的会话**的，任何能写收件箱的进程都能影响文件名。
+ *
+ * T3-4/audit：U+2028 LINE SEPARATOR / U+2029 PARAGRAPH SEPARATOR 也必须算进来。
+ * 它们是**合法的 NTFS 文件名字符**，既不在 C0 也不在 C1，却在大量渲染器和
+ * 分词器里就是换行 —— 一个带 U+2028 的文件名能原样穿过这里，把 JS-H5 要堵的
+ * 「多行伪造 user 消息」载体重新带进注入文本。Zl/Zp 两个分类只有这两个码位，
+ * NEL(U+0085)/VT/FF 已经落在 C0/C1 区间里。
  */
 function sanitizeText(value, max = 200) {
   return String(value ?? '')
-    .replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ')
+    .replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ')
     .replace(/\s{2,}/g, ' ')
     .trim()
     .slice(0, max)
@@ -37,11 +43,12 @@ function redactPath(value) {
   return s.replace(new RegExp(`^${esc}`, 'i'), '~')
 }
 
-/** 注入点兜底：只放行通知自身使用的 `\n`，其余控制字符一律剥掉，并限长。 */
+/** 注入点兜底：只放行通知自身使用的 `\n`，其余控制字符（含 T3-4 的 U+2028/9）
+ *  一律剥掉，并限长。 */
 function hardenForSession(text) {
   return String(text ?? '')
     .replace(/\r/g, '')
-    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/g, ' ')
+    .replace(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/g, ' ')
     .slice(0, MAX_NOTICE_CHARS + 200)
 }
 
