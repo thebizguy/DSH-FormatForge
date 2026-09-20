@@ -290,7 +290,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
                     data["enhance"] = {"needed": False, "hint": new_hint}  # type: ignore[assignment]
     # A9/v0.10.0: --output-file 把 content 落盘（stdout 协议 JSON 不变）
     # FF-M-protocol/audit: 写入失败不再「logger.warning + ok:true」；目标路径
-    # 收敛到用户声明的根（FF_OUTPUT_ROOT / CWD / 源文件目录），越界报 bad_request。
+    # 收敛到用户显式声明的 FF_OUTPUT_ROOT；代码/导入路径始终受保护，越界报 bad_request。
     output_file = getattr(args, "output_file", None)
     if output_file:
         from formatforge.output_guard import OutputPathError, resolve_output_path

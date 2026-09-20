@@ -2,11 +2,12 @@
 
 旧实现 `mkdir(parents=True, exist_ok=True)` + `write_text` 接受任意路径：
 `--output-file ../../.dsh/config.json` 这类目标可被模型驱动的工具调用写入
-（与 H11 同类的无沙箱写原语）。这里把可写范围收敛到**用户声明的根**：
+（与 H11 同类的无沙箱写原语）。这里把可写范围收敛到**用户显式声明的根**：
 
-  1. `FF_OUTPUT_ROOT` 环境变量（可多个，用 `os.pathsep` 分隔）——显式声明优先；
-  2. 未声明时退回 CLI 进程 CWD（工具调用方 spawn 时的工作目录）；
-  3. 再加上源文件所在目录（用户自己给出的那个路径所在处）。
+  1. `FF_OUTPUT_ROOT` 环境变量（可多个，用 `os.pathsep` 分隔）是唯一授权来源；
+  2. 未声明时 fail closed，不再把 CLI 进程 CWD 当作隐式授权；
+  3. 源文件目录只描述输入，不能扩大输出边界；
+  4. 仓库根和任何 Python 导入路径始终是只读保护区，即使配置误把它们包含在内。
 
 越界即抛 `OutputPathError`，由调用方转成 `bad_request` 协议错误——不再
 「静默警告 + ok:true」。
@@ -14,8 +15,8 @@
 
 from __future__ import annotations
 
-import contextlib
 import os
+import sys
 from pathlib import Path
 
 
@@ -32,17 +33,11 @@ def _absolute(path: Path) -> Path:
 
 
 def allowed_output_roots(*, source: Path | None = None) -> list[Path]:
-    """当前允许写入的根目录列表（已绝对化、去重、顺序稳定）。"""
+    """返回显式声明的可写根（source 仅为向后兼容，绝不授予权限）。"""
     roots: list[Path] = []
     declared = os.environ.get("FF_OUTPUT_ROOT")
     if declared:
         roots.extend(Path(chunk.strip()) for chunk in declared.split(os.pathsep) if chunk.strip())
-    if not roots:
-        roots.append(Path.cwd())
-    if source is not None:
-        src = Path(source)
-        with contextlib.suppress(OSError):  # pragma: no cover - 防御
-            roots.append(src if src.is_dir() else src.parent)
 
     resolved: list[Path] = []
     for root in roots:
@@ -50,6 +45,16 @@ def allowed_output_roots(*, source: Path | None = None) -> list[Path]:
         if root_abs not in resolved:
             resolved.append(root_abs)
     return resolved
+
+
+def _protected_output_roots() -> list[Path]:
+    """返回无论如何都不得写入的代码/导入根。"""
+    roots = [_absolute(Path(__file__).parent.parent)]
+    for entry in sys.path:
+        root = _absolute(Path.cwd() if not entry else Path(entry))
+        if root not in roots:
+            roots.append(root)
+    return roots
 
 
 def resolve_output_path(
@@ -61,6 +66,16 @@ def resolve_output_path(
     """校验目标路径并返回可写绝对路径；越界抛 OutputPathError。"""
     resolved = _absolute(Path(target))
     roots = allowed_output_roots(source=source)
+    if not roots:
+        raise OutputPathError(
+            f"{label} 写入被拒绝：未配置 FF_OUTPUT_ROOT；"
+            "请显式声明一个位于代码和 Python 导入路径之外的输出根。"
+        )
+    for protected in _protected_output_roots():
+        if resolved.is_relative_to(protected):
+            raise OutputPathError(
+                f"{label} 目标受保护：{resolved} 位于代码或 Python 导入路径 {protected} 内。"
+            )
     for root in roots:
         if resolved.is_relative_to(root):
             return resolved
