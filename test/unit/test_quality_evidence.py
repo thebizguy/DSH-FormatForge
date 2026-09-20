@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from core.quality_report import QualityReport
+from core.quality_report import QualityReport, _TEXT_EVIDENCE_SAMPLE_CHARS, _sample_text_evidence
 
 # 一段「看起来很长」的二进制透传内容：JPEG/PNG 头 + 伪随机字节，按 H1 的
 # raw 透传路径解码（utf-8 + errors=replace）→ 大量 U+FFFD 与控制字符。
@@ -27,6 +27,14 @@ def _coverage(content: str, file_size: int, file_type: str = "pdf") -> float:
 
 
 class TestEvidenceBasedCoverage:
+    def test_large_text_evidence_uses_a_bounded_even_sample(self):
+        content = "a" * (_TEXT_EVIDENCE_SAMPLE_CHARS * 3)
+
+        sample = _sample_text_evidence(content)
+
+        assert len(sample) == _TEXT_EVIDENCE_SAMPLE_CHARS
+        assert QualityReport._text_evidence(content) == (1.0, 1.0, 1.0)
+
     def test_real_text_keeps_full_coverage(self):
         assert _coverage(REAL_TEXT, file_size=len(REAL_TEXT.encode("utf-8")) // 2) == 100.0
 

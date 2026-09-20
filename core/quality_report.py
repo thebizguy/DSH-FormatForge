@@ -11,6 +11,16 @@ from typing import Any
 
 logger = logging.getLogger("quality_report")
 
+_TEXT_EVIDENCE_SAMPLE_CHARS = 65_536
+
+
+def _sample_text_evidence(content: str) -> str:
+    """Return an evenly spaced, bounded sample for character classification."""
+    if len(content) <= _TEXT_EVIDENCE_SAMPLE_CHARS:
+        return content
+    step = (len(content) + _TEXT_EVIDENCE_SAMPLE_CHARS - 1) // _TEXT_EVIDENCE_SAMPLE_CHARS
+    return content[::step]
+
 
 class QualityReport:
     """解析质量报告"""
@@ -83,10 +93,14 @@ class QualityReport:
         """
         if not content:
             return 0.0, 0.0, 0.0
-        total = len(content)
+        # K-5: quality runs automatically for --type auto. Classifying every
+        # character in a maximum-sized input made this a new O(N) hot path;
+        # an even sample keeps the signal representative with a fixed ceiling.
+        sample = _sample_text_evidence(content)
+        total = len(sample)
         printable = 0
         lexical = 0
-        for ch in content:
+        for ch in sample:
             if ch in "\n\r\t" or (ch.isprintable() and ch != "\ufffd"):
                 printable += 1
             if ch.isalnum():
