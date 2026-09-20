@@ -71,15 +71,19 @@ class TestCsvLow:
         assert "\ufeff" not in table.metadata["header"]
         assert "\ufeff" not in table.content
 
-    def test_ragged_rows_normalized_to_header(self, parser, tmp_path):
+    def test_ragged_rows_normalized_to_widest_row(self, parser, tmp_path):
+        # T1-3/audit: 归一目标是「最宽行」，不是表头宽度。这个用例原先断言
+        # cols == 3，把 "overflow" 的丢失锁进了测试；列宽统一的诉求仍然成立，
+        # 但必须靠补齐窄行实现，不能靠截断宽行。
         f = tmp_path / "ragged.csv"
         f.write_text("id,name,extra\n1,a\n2,b,c,overflow\n", encoding="utf-8")
         page = parser.parse(f)[0]
         table = page.elements[0]
-        assert table.metadata["cols"] == 3
+        assert table.metadata["cols"] == 4
         assert table.metadata["ragged_rows"] == 2
         rows = [e for e in page.elements if e.elementType == "table_row"]
-        assert all(e.metadata["cols"] == 3 for e in rows)
+        assert all(e.metadata["cols"] == 4 for e in rows)
+        assert "overflow" in table.content
 class TestAudioLow:
     """FF-L-audio/audit: <128 字节 MP3 的 seek 守卫。"""
 
