@@ -70,7 +70,10 @@ function readArtifactMeta(full, size) {
  *
  * 内存边界：一块复用的 64KB 读缓冲 + ≤64B 的键 token + ≤64KB 的 meta 收集区。
  * 与产物大小无关；代价是顺序 I/O（meta 之前的正文必须读过去，但不驻留）。
- * 停止条件不预设键序：`ok`/`content`/`meta` 三项齐了就停，否则一路扫到 `data` 闭合。
+ * 停止条件不预设键序：`ok`/`content`/`meta` 三项齐了就停；不齐就一路扫到信封闭合
+ * （T3-3：旧代码只看 `meta`+`content`，`ok` 不在停止条件里，而兜底又停在 `data` 闭合
+ *  —— 一旦 `ok` 排在 `data` 之后，每一份大产物都会被判成 `ok:false`，正是这个扫描器
+ *  当初要消灭的「假设键序」。注释宣称的保证必须由代码兑现，不是反过来）。
  */
 function scanEnvelopeHead(full) {
   let fd
@@ -91,6 +94,7 @@ function scanEnvelopeHead(full) {
   const keyAt = [] // keyAt[d] = 第 d 层当前正在赋值的键
   let okLiteral = null // 读到 `"ok":` 之后收集字面量
   let ok = false
+  let okSeen = false // 顶层 `ok` 的值是否真的读到过（T3-3：停止条件要求它）
   let contentIsString = false
   let capturing = false
   let captureBaseDepth = 0
@@ -190,6 +194,7 @@ function scanEnvelopeHead(full) {
           if (okLiteral !== null) {
             ok = okLiteral === 'true'
             okLiteral = null
+            okSeen = true
           }
           depth--
           if (capturing && depth === captureBaseDepth) {
@@ -204,14 +209,22 @@ function scanEnvelopeHead(full) {
             }
           }
           i++
-          // 协议键序下 content 在 meta 之前 → 这里就已经问完了，正常产物扫到 meta 即止。
-          // 若 meta 反而排在前面（非协议顺序），继续扫到 data 闭合为止——不重蹈
-          // 「假设键序」的覆辙，代价只是多读一遍（顺序 I/O，内存不变）。
-          if (metaSeen && contentIsString) {
+          // 协议键序（ok → code → data{content → format → meta}）下三项在 meta 闭合时
+          // 就都齐了 → 正常产物照旧扫到 meta 即止。
+          // T3-3：`ok` 必须在停止条件里。旧代码只要 `meta`+`content` 就停，兜底又停在
+          // `data` 闭合 —— 两条路径都可能在读到 `ok` 之前收工，只要 `ok` 排在 `data`
+          // 之后，每份大产物都会被判成 `ok:false`（正是这段代码当初要消灭的
+          // 「⚠非转换产物」误报）。缺 `ok` 就一路扫到**信封**闭合，代价只是多读一段
+          // 顺序 I/O，内存不变。
+          if (okSeen && metaSeen && contentIsString) {
             done = true
             break
           }
-          if (depth === 1 && keyAt[1] === 'data') {
+          if (depth <= 0) {
+            done = true
+            break
+          }
+          if (depth === 1 && keyAt[1] === 'data' && okSeen) {
             done = true
             break
           }
@@ -228,6 +241,7 @@ function scanEnvelopeHead(full) {
           if (okLiteral !== null) {
             ok = okLiteral === 'true'
             okLiteral = null
+            okSeen = true
           }
           keyAt[depth] = null
           lastToken = null
