@@ -383,39 +383,81 @@ def cmd_batch(args: argparse.Namespace) -> int:
         }
         # H4/audit: as_completed 带相对超时——一个 hung 文件不能把整批 wedged 到天荒地老
         total_budget = per_file_timeout * max(1, len(futures))
+        # T2-8/audit: 每个 future 必须恰好产出一行。collected 是「已经记过账」的集合，
+        # 超时清扫要靠它区分「完成但没被 as_completed 吐出来」和「真的还在跑」。
+        collected: set[Any] = set()
+
+        def _record(fut: Any, target: Path) -> None:
+            collected.add(fut)
+            try:
+                results.append(fut.result())
+            except concurrent.futures.CancelledError:
+                results.append(
+                    {
+                        "file": str(target),
+                        "ok": False,
+                        "kind": "timeout",
+                        "message": f"单文件转换超时（>{per_file_timeout}s），任务已取消",
+                        "elapsed_ms": 0,
+                    }
+                )
+            except Exception as e:  # noqa: BLE001  单行异常不拖垮整批
+                results.append(
+                    {
+                        "file": str(target),
+                        "ok": False,
+                        "kind": "parse_failed",
+                        "message": str(e),
+                        "elapsed_ms": 0,
+                    }
+                )
+
         try:
             for fut in as_completed(futures, timeout=total_budget):
-                try:
-                    results.append(fut.result())
-                except Exception as e:  # noqa: BLE001  单行异常不拖垮整批
-                    results.append(
-                        {
-                            "file": str(futures[fut]),
-                            "ok": False,
-                            "kind": "parse_failed",
-                            "message": str(e),
-                            "elapsed_ms": 0,
-                        }
-                    )
+                _record(fut, futures[fut])
         except concurrent.futures.TimeoutError:
+            # T2-8/audit: 旧代码只处理 `not fut.done()`，于是「预算到点前已经跑完、
+            # 但 as_completed 还没来得及 yield」的 future 两边都不落——既不在
+            # results 里，也不算 timeout。结果 ok_count + failed + skipped < total，
+            # 一个转换成功的文件从 _batch_report.json 里凭空消失；产物却在盘上，
+            # 续跑按 mtime 跳过它，用户永远不会知道它成功过。
             for fut, target in futures.items():
-                if not fut.done():
-                    fut.cancel()
-                    results.append(
-                        {
-                            "file": str(target),
-                            "ok": False,
-                            "kind": "timeout",
-                            "message": f"单文件转换超时（>{per_file_timeout}s），未被整批拖垮",
-                            "elapsed_ms": 0,
-                        }
-                    )
+                if fut in collected:
+                    continue
+                if fut.done():
+                    _record(fut, target)
+                    continue
+                fut.cancel()
+                collected.add(fut)
+                results.append(
+                    {
+                        "file": str(target),
+                        "ok": False,
+                        "kind": "timeout",
+                        "message": f"单文件转换超时（>{per_file_timeout}s），未被整批拖垮",
+                        "elapsed_ms": 0,
+                    }
+                )
             logger.warning("batch 部分文件超时——注意：worker 线程仍可能在后台运行")
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
 
     ok_rows = [r for r in results if r["ok"]]
     fail_rows = [r for r in results if not r["ok"]]
+    # T2-8/audit: 记账不变式。targets = pending + skipped，且每个 pending 恰好提交
+    # 一个 future，所以 ok + failed + skipped 必须等于 total。先前的审计把这个不变式
+    # 当作「构造上必然成立」而驳回了对它的质疑——而 H4/H5 加的超时分支正是打破那个
+    # 构造的地方。不用 assert（-O 会被剥掉，且崩掉整批比报出来更糟），出问题就留痕。
+    accounted = len(ok_rows) + len(fail_rows) + skipped
+    if accounted != len(targets):
+        logger.error(
+            "batch 记账不变式被破坏: ok=%d + failed=%d + skipped=%d = %d != total=%d",
+            len(ok_rows),
+            len(fail_rows),
+            skipped,
+            accounted,
+            len(targets),
+        )
     avg_conf = (sum(r.get("confidence", 0.0) for r in ok_rows) / len(ok_rows)) if ok_rows else 0.0
     elapsed_ms = int((time.time() - started_all) * 1000)
 

@@ -351,3 +351,97 @@ class TestT27HashedNameCollision:
         assert plan[p1].name == f"same.txt.{self._hashed_name_of(p1)}.md"
         assert plan[p2].name == f"same.txt.{self._hashed_name_of(p2)}.md"
 
+
+class TestT28TimeoutSweepAccounting:
+    """T2-8/audit: 超时清扫必须把「已完成但没被 yield 出来」的 future 也记上账。
+
+    `as_completed` 在预算到点时直接抛 TimeoutError，不会把手里还没吐出去的已完成
+    future 交出来；而旧的 except 分支只处理 `not fut.done()`。两边都不认领的那些
+    future 就这么消失了：`ok_count + failed + skipped < total`，一个转换成功的文件
+    在 _batch_report.json 里无影无踪，产物却躺在盘上——续跑按 mtime 判定跳过，
+    用户永远不会知道它成功过。
+
+    真实竞态（预算到点与 `fut.done()` 之间完成）无法稳定复现，所以这里把
+    `as_completed` 换成一个确定性的替身：先等 worker 真正跑完，再模拟预算到点。
+    被测的是 except 分支本身，不是 `as_completed` 的内部计时。
+    """
+
+    def _report(self, out):
+        return json.loads((out / "_batch_report.json").read_text(encoding="utf-8"))
+
+    def _budget_expires_after(self, monkeypatch, wait_kw):
+        """把 as_completed 换成「等到 wait_kw 指定的时机，然后预算到点」。"""
+        import concurrent.futures as cf
+
+        import formatforge.batch as batch_mod
+
+        def fake_as_completed(fs, timeout=None):
+            cf.wait(list(fs), timeout=30, **wait_kw)
+            raise cf.TimeoutError()
+            yield  # pragma: no cover —— 只为把它变成生成器函数
+
+        monkeypatch.setattr(batch_mod, "as_completed", fake_as_completed)
+
+    def test_all_completed_work_survives_a_budget_expiry(self, tmp_path, monkeypatch):
+        import concurrent.futures as cf
+
+        self._budget_expires_after(monkeypatch, {"return_when": cf.ALL_COMPLETED})
+        d = tmp_path / "docs"
+        d.mkdir()
+        (d / "a.txt").write_text("alpha body", encoding="utf-8")
+        (d / "b.txt").write_text("beta body", encoding="utf-8")
+        out = tmp_path / "out"
+
+        cmd_batch(_Args(d, out))
+
+        report = self._report(out)
+        assert report["total"] == 2
+        # 不变式：每个目标恰好记一次账
+        assert report["ok_count"] + report["failed"] + report["skipped"] == report["total"]
+        assert report["ok_count"] == 2, "跑完了却没进报告的文件凭空消失了"
+        assert {Path(r["file"]).name for r in report["results"]} == {"a.txt", "b.txt"}
+        # 报告里的成功行与盘上的产物一致（旧行为：产物在、行不在）
+        for row in report["results"]:
+            assert Path(row["out"]).exists()
+
+    def test_finished_and_hung_files_are_both_accounted(self, tmp_path, monkeypatch):
+        import concurrent.futures as cf
+        import time as _time
+
+        from core.config import settings
+
+        def maybe_slow(path, *args, **kwargs):
+            if Path(path).name == "hung.txt":
+                _time.sleep(10)
+            return f"converted {Path(path).name}", {"parser": "txt", "confidence": 0.9, "result_id": "r"}, None
+
+        monkeypatch.setattr("formatforge.__main__.cmd_translate_main", maybe_slow)
+        monkeypatch.setattr(settings, "FF_TIMEOUT_S", 1)
+        # 快的那个一完成就宣告预算到点 → 它 done 但从未被 yield
+        self._budget_expires_after(monkeypatch, {"return_when": cf.FIRST_COMPLETED})
+        d = tmp_path / "mix"
+        d.mkdir()
+        (d / "fast.txt").write_text("fast body", encoding="utf-8")
+        (d / "hung.txt").write_text("hung body", encoding="utf-8")
+        out = tmp_path / "out"
+
+        cmd_batch(_Args(d, out))
+
+        report = self._report(out)
+        rows = {Path(r["file"]).name: r for r in report["results"]}
+        assert report["total"] == 2
+        assert report["ok_count"] + report["failed"] + report["skipped"] == report["total"]
+        assert set(rows) == {"fast.txt", "hung.txt"}, "完成但未被 yield 的行丢了"
+        assert rows["fast.txt"]["ok"] is True
+        assert rows["hung.txt"]["ok"] is False
+        assert rows["hung.txt"]["kind"] == "timeout"
+
+        # 卫生：清理 shutdown(wait=False) 留下的 sleep job（同 TestH4Timeout）
+        holder = cf.ThreadPoolExecutor(max_workers=1)
+        holder.shutdown(wait=False)
+
+    def test_invariant_holds_on_the_normal_path(self, tmp_path, sample_dir):
+        """没有超时时不变式当然也要成立——防止修复只照顾异常分支。"""
+        _, report, _ = _run(tmp_path, sample_dir)
+        assert report["ok_count"] + report["failed"] + report["skipped"] == report["total"]
+
