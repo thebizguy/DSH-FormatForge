@@ -370,10 +370,18 @@ def _compute_diff(
     diff_chunks: list[str] = []
     budget = max_chars
     truncated = False
+    # T2-6/audit: diff_total_chars 是冻结字段，名字承诺的是「整份 diff 的长度」。
+    # 封顶之后 diff_chunks 只剩保留下来的前缀，len(diff_text) 只会报到 ~max_chars。
+    # 每一行都会流经 _emit_line（opcode 循环不提前 break，只是不再 append），所以
+    # 在这里按行累加即可拿到真实总长，不需要把整份 diff 再物化一遍。
+    total_chars = 0
 
     def _emit_line(s: str) -> bool:
         """把一行计入 diff 输出；预算耗尽返回 False（调用方停止追加）。"""
-        nonlocal budget, truncated
+        nonlocal budget, truncated, total_chars
+        # 先记账：无论这一行是否还进得了 diff_chunks，它都属于整份 diff。
+        # +1 是 "\n".join 的连接符（末行多算的那个在返回时减掉）。
+        total_chars += len(s) + 1
         if truncated:
             return False
         diff_chunks.append(s)
@@ -436,7 +444,10 @@ def _compute_diff(
         "diff_preview": diff_preview,
         "truncated": truncated,
         "max_chars": max_chars,
-        "diff_total_chars": len(diff_text),
+        # T2-6/audit: 未封顶时与 len(diff_text) 逐字节相等；封顶时报的是整份 diff
+        # 的长度（即 max_chars 无限大时会得到的那个数），不是保留下来的前缀长度。
+        # 口径里不含被 --context 省略掉的未变更行——那些行在任何预算下都不属于 diff。
+        "diff_total_chars": max(0, total_chars - 1),
     }
 
 

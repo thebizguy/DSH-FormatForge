@@ -262,3 +262,63 @@ class TestJsonFormatLineAccounting:
         assert payload["ok"] is False
         assert payload["error"]["kind"] == "bad_request"
         assert "同一文件" in payload["error"]["message"]
+
+
+class TestT26DiffTotalChars:
+    """T2-6/audit: diff_total_chars 必须是整份 diff 的长度，不是 preview 的长度。
+
+    预算封顶后 `_emit_line` 不再往 diff_chunks 里追加，于是
+    `diff_total_chars = len(diff_text)` 变成「保留下来的前缀有多长」，
+    truncated 为真时恒等于 ~max_chars——字段名承诺的总量再也拿不到。
+    """
+
+    def _pair(self, tmp_path: Path) -> tuple[Path, Path]:
+        a = tmp_path / "old.txt"
+        b = tmp_path / "new.txt"
+        # 每一行都不同 → 全是 replace，没有可省略的未变更块
+        a.write_text("\n".join(f"old line {i:04d} xxxxxxxxxxxxxxxx" for i in range(300)) + "\n", encoding="utf-8")
+        b.write_text("\n".join(f"new line {i:04d} yyyyyyyyyyyyyyyy" for i in range(300)) + "\n", encoding="utf-8")
+        return a, b
+
+    def test_total_is_the_whole_diff_not_the_kept_prefix(self, tmp_path, capsys):
+        a, b = self._pair(tmp_path)
+        capped, rc = _run_diff(capsys, str(a), str(b), "--format", "text", "--max-chars", "500")
+        assert rc == 0, capped
+        d = capped["data"]
+        assert d["truncated"] is True
+        assert len(d["diff_preview"]) <= 500
+
+        # 参照值：预算足够大时不封顶，此时 preview 就是整份 diff。
+        full, rc2 = _run_diff(capsys, str(a), str(b), "--format", "text", "--max-chars", "2000000")
+        assert rc2 == 0, full
+        assert full["data"]["truncated"] is False
+        true_total = len(full["data"]["diff_preview"])
+
+        assert true_total > 500
+        assert d["diff_total_chars"] == true_total, "封顶后报的是 preview 长度"
+        assert d["diff_total_chars"] > d["max_chars"]
+        assert d["diff_total_chars"] > len(d["diff_preview"])
+
+    def test_untruncated_total_still_matches_the_preview(self, tmp_path, capsys):
+        """向后兼容：没封顶时这个字段的值一个字节都不许变。"""
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_text("l1\nl2\nl3\n", encoding="utf-8")
+        b.write_text("l1\nl2-x\nl3\n", encoding="utf-8")
+        payload, rc = _run_diff(capsys, str(a), str(b), "--format", "text")
+        assert rc == 0, payload
+        d = payload["data"]
+        assert d["truncated"] is False
+        assert d["diff_total_chars"] == len(d["diff_preview"])
+
+    def test_marker_only_diff_is_never_negative(self, tmp_path, capsys):
+        """几乎没有内容的 diff 不能因为收尾减 1 报成负数。"""
+        a = tmp_path / "a.txt"
+        b = tmp_path / "b.txt"
+        a.write_text("same\n", encoding="utf-8")
+        b.write_text("same\n", encoding="utf-8")
+        payload, _rc = _run_diff(capsys, str(a), str(b), "--format", "text", "--context", "0")
+        d = payload["data"]
+        assert d["diff_total_chars"] >= 0
+        assert d["diff_total_chars"] == len(d["diff_preview"])
+
