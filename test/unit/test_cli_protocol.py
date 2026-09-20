@@ -148,7 +148,7 @@ class TestTranslateErrors:
     def test_directory_rejected(self):
         payload, code = run_cli("translate", str(REPO_ROOT / "test"))
         assert payload["ok"] is False
-        assert payload["error"]["kind"] == "file_not_found"
+        assert payload["error"]["kind"] == "is_directory"
         assert code == 2
 
 

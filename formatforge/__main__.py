@@ -255,7 +255,7 @@ def cmd_translate(args: argparse.Namespace) -> int:
         if not path.exists():
             return _fail("not_found", f"文件不存在: {path}")
         if not path.is_file():
-            return _fail("not_found", f"路径不是文件: {path}")
+            return _fail("is_directory", f"路径不是文件: {path}")
         size = path.stat().st_size
         if size > settings.FF_MAX_BYTES:
             return _fail("too_large", f"文件 {size} 字节超过上限 {settings.FF_MAX_BYTES}")
